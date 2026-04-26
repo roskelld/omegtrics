@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+Omegtrics
+
 Extract a visible SteamDB/Highcharts player-count SVG series into CSV.
 
 The script can either:
