@@ -321,6 +321,90 @@
     </svg>`;
   }
 
+  function hourInWindow(hour, start, end) {
+    if (start <= end) {
+      return hour >= start && hour <= end;
+    }
+    return hour >= start || hour <= end;
+  }
+
+  function analyseRegions(rows) {
+    const regions = [
+      {
+        name: "Americas",
+        detail: "North and South America evening play",
+        utcWindow: "00:00-05:59 UTC",
+        start: 0,
+        end: 5
+      },
+      {
+        name: "Europe / Africa",
+        detail: "Europe and Africa evening play",
+        utcWindow: "18:00-23:59 UTC",
+        start: 18,
+        end: 23
+      },
+      {
+        name: "Asia / Oceania",
+        detail: "Asia-Pacific evening play",
+        utcWindow: "10:00-15:59 UTC",
+        start: 10,
+        end: 15
+      }
+    ];
+    const overallAverage = rows.reduce((sum, row) => sum + row.players, 0) / Math.max(rows.length, 1);
+    const results = regions.map((region) => {
+      const matching = rows.filter((row) => hourInWindow(row.timestamp.getUTCHours(), region.start, region.end));
+      const average = matching.reduce((sum, row) => sum + row.players, 0) / Math.max(matching.length, 1);
+      const peak = matching.reduce((max, row) => Math.max(max, row.players), 0);
+      const lift = overallAverage ? average / overallAverage : 0;
+      const strength = lift >= 1.15 ? "Strong" : lift >= 0.95 ? "Moderate" : "Light";
+      return { ...region, samples: matching.length, average, peak, lift, strength };
+    });
+    const totalAverage = results.reduce((sum, region) => sum + region.average, 0) || 1;
+    return results
+      .map((region) => ({ ...region, share: region.average / totalAverage }))
+      .sort((a, b) => b.average - a.average);
+  }
+
+  function makeRegionsHtml(rows) {
+    const regions = analyseRegions(rows);
+    const top = regions[0];
+    const regionRows = regions
+      .map((region) => `<tr>
+        <td>${region.name}</td>
+        <td>${region.utcWindow}</td>
+        <td>${fmt(region.average)}</td>
+        <td>${fmt(region.peak)}</td>
+        <td>${region.lift.toFixed(2)}x</td>
+        <td>${Math.round(region.share * 100)}%</td>
+        <td>${region.strength}</td>
+      </tr>`)
+      .join("");
+    const bars = regions
+      .map((region) => `<div class="omegtrics-region-bar">
+        <div class="omegtrics-region-bar-header"><span>${region.name}</span><strong>${Math.round(region.share * 100)}%</strong></div>
+        <div class="omegtrics-region-track"><div class="omegtrics-region-fill" style="width:${Math.max(region.share * 100, 3).toFixed(1)}%"></div></div>
+        <span class="omegtrics-label">${region.detail}</span>
+      </div>`)
+      .join("");
+    return `
+      <div class="omegtrics-summary">
+        <div class="omegtrics-metric"><span class="omegtrics-label">Strongest regional signal</span><span class="omegtrics-value">${top.name}</span><span class="omegtrics-label">${top.strength.toLowerCase()} signal</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Prime-time average</span><span class="omegtrics-value">${fmt(top.average)}</span><span class="omegtrics-label">${top.utcWindow}</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Regional lift</span><span class="omegtrics-value">${top.lift.toFixed(2)}x</span><span class="omegtrics-label">vs all-hour average</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Signal share</span><span class="omegtrics-value">${Math.round(top.share * 100)}%</span><span class="omegtrics-label">of regional windows</span></div>
+      </div>
+      <div class="omegtrics-region-bars">${bars}</div>
+      <p class="omegtrics-note">This is a time-zone popularity signal inferred from when CCU rises. It does not identify player location directly; it compares broad UTC prime-time windows that roughly map to regional evening play.</p>
+      <div class="omegtrics-table-wrap">
+        <table class="omegtrics-table">
+          <thead><tr><th>Region signal</th><th>UTC window</th><th>Avg CCU</th><th>Peak CCU</th><th>Lift</th><th>Share</th><th>Strength</th></tr></thead>
+          <tbody>${regionRows}</tbody>
+        </table>
+      </div>`;
+  }
+
   function renderPanel(container, metadata, ccuRows, initialSession) {
     document.getElementById(PANEL_ID)?.remove();
     const panel = document.createElement("section");
@@ -386,6 +470,7 @@
       </div>
       <div class="omegtrics-tabs" role="tablist" aria-label="Omegtrics analysis views">
         <button type="button" class="omegtrics-tab is-active" role="tab" aria-selected="true" aria-controls="omegtrics-tab-dau" data-tab-target="dau">DAU</button>
+        <button type="button" class="omegtrics-tab" role="tab" aria-selected="false" aria-controls="omegtrics-tab-regions" data-tab-target="regions">Regions</button>
         <button type="button" class="omegtrics-tab" role="tab" aria-selected="false" aria-controls="omegtrics-tab-patterns" data-tab-target="patterns">Patterns</button>
         <button type="button" class="omegtrics-tab" role="tab" aria-selected="false" aria-controls="omegtrics-tab-retention" data-tab-target="retention">Retention</button>
       </div>
@@ -398,10 +483,13 @@
         <p class="omegtrics-subtitle">${initialSession.note} Adjust the session assumptions to test the DAU range.</p>
         <div data-dau-results></div>
       </div>
+      <div class="omegtrics-tab-panel" id="omegtrics-tab-regions" role="tabpanel" hidden data-tab-panel="regions">
+        ${makeRegionsHtml(ccuRows)}
+      </div>
       <div class="omegtrics-tab-panel" id="omegtrics-tab-patterns" role="tabpanel" hidden data-tab-panel="patterns">
         <div class="omegtrics-empty-state">
           <h3>Patterns</h3>
-          <p>Upcoming view for peak windows, weekday comparisons, and regional activity signals.</p>
+          <p>Upcoming view for peak windows and weekday comparisons.</p>
         </div>
       </div>
       <div class="omegtrics-tab-panel" id="omegtrics-tab-retention" role="tabpanel" hidden data-tab-panel="retention">

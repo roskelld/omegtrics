@@ -168,6 +168,42 @@
   color: var(--muted-color, #999);
 }
 
+.omegtrics-region-bars {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.omegtrics-region-bar {
+  padding: 12px;
+  border: 1px solid var(--border-color-2, #263243);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--body-bg-color, #161920) 76%, #ffffff 7%);
+}
+
+.omegtrics-region-bar-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--contrast-color, #fff);
+  font-weight: 650;
+}
+
+.omegtrics-region-track {
+  height: 8px;
+  margin-bottom: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border-color-2, #263243);
+}
+
+.omegtrics-region-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--link-color, #00aff4);
+}
+
 .omegtrics-empty-state {
   padding: 18px;
   border: 1px dashed var(--border-color, #3d4654);
