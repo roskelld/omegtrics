@@ -335,7 +335,7 @@
         high: Number(panel.querySelector("[data-session-high]")?.value || initialSession.high)
       };
       if (!(session.low > 0 && session.mid > 0 && session.high > 0 && session.low <= session.mid && session.mid <= session.high)) {
-        panel.querySelector("[data-results]").innerHTML = '<div class="omegtrics-error">Session inputs must satisfy low <= midpoint <= high.</div>';
+        panel.querySelector("[data-dau-results]").innerHTML = '<div class="omegtrics-error">Session inputs must satisfy low <= midpoint <= high.</div>';
         return;
       }
       const estimates = estimateDaily(ccuRows, session);
@@ -360,7 +360,7 @@
         </tr>`)
         .join("");
 
-      panel.querySelector("[data-results]").innerHTML = `
+      panel.querySelector("[data-dau-results]").innerHTML = `
         <div class="omegtrics-summary">
           <div class="omegtrics-metric"><span class="omegtrics-label">Latest DAU estimate</span><span class="omegtrics-value">${fmt(latest.dauMid)}</span><span class="omegtrics-label">${fmt(latest.dauLow)}-${fmt(latest.dauHigh)} range</span></div>
           <div class="omegtrics-metric"><span class="omegtrics-label">Average DAU estimate</span><span class="omegtrics-value">${fmt(avgMid)}</span><span class="omegtrics-label">${fmt(avgLow)}-${fmt(avgHigh)} range</span></div>
@@ -380,17 +380,51 @@
     panel.innerHTML = `
       <div class="omegtrics-header">
         <div>
-          <h2 class="omegtrics-title">Omegtrics DAU Estimate</h2>
+          <h2 class="omegtrics-title">Omegtrics</h2>
           <p class="omegtrics-subtitle">${metadata.name || "SteamDB app"} · ${metadata.primaryGenre || "Unknown genre"} · ${metadata.tags.slice(0, 4).join(", ")}</p>
         </div>
       </div>
-      <div class="omegtrics-controls" aria-label="Session assumptions">
-        <div class="omegtrics-control"><label>Low session hours</label><input type="number" min="0.1" step="0.25" value="${initialSession.low}" data-session-low></div>
-        <div class="omegtrics-control"><label>Midpoint session hours</label><input type="number" min="0.1" step="0.25" value="${initialSession.mid}" data-session-mid></div>
-        <div class="omegtrics-control"><label>High session hours</label><input type="number" min="0.1" step="0.25" value="${initialSession.high}" data-session-high></div>
+      <div class="omegtrics-tabs" role="tablist" aria-label="Omegtrics analysis views">
+        <button type="button" class="omegtrics-tab is-active" role="tab" aria-selected="true" aria-controls="omegtrics-tab-dau" data-tab-target="dau">DAU</button>
+        <button type="button" class="omegtrics-tab" role="tab" aria-selected="false" aria-controls="omegtrics-tab-patterns" data-tab-target="patterns">Patterns</button>
+        <button type="button" class="omegtrics-tab" role="tab" aria-selected="false" aria-controls="omegtrics-tab-retention" data-tab-target="retention">Retention</button>
       </div>
-      <p class="omegtrics-subtitle">${initialSession.note} Adjust the session assumptions to test the DAU range.</p>
-      <div data-results></div>`;
+      <div class="omegtrics-tab-panel is-active" id="omegtrics-tab-dau" role="tabpanel" data-tab-panel="dau">
+        <div class="omegtrics-controls" aria-label="Session assumptions">
+          <div class="omegtrics-control"><label>Low session hours</label><input type="number" min="0.1" step="0.25" value="${initialSession.low}" data-session-low></div>
+          <div class="omegtrics-control"><label>Midpoint session hours</label><input type="number" min="0.1" step="0.25" value="${initialSession.mid}" data-session-mid></div>
+          <div class="omegtrics-control"><label>High session hours</label><input type="number" min="0.1" step="0.25" value="${initialSession.high}" data-session-high></div>
+        </div>
+        <p class="omegtrics-subtitle">${initialSession.note} Adjust the session assumptions to test the DAU range.</p>
+        <div data-dau-results></div>
+      </div>
+      <div class="omegtrics-tab-panel" id="omegtrics-tab-patterns" role="tabpanel" hidden data-tab-panel="patterns">
+        <div class="omegtrics-empty-state">
+          <h3>Patterns</h3>
+          <p>Upcoming view for peak windows, weekday comparisons, and regional activity signals.</p>
+        </div>
+      </div>
+      <div class="omegtrics-tab-panel" id="omegtrics-tab-retention" role="tabpanel" hidden data-tab-panel="retention">
+        <div class="omegtrics-empty-state">
+          <h3>Retention</h3>
+          <p>Upcoming view for engagement and repeat-play indicators derived from CCU shape.</p>
+        </div>
+      </div>`;
+    panel.querySelectorAll("[data-tab-target]").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        const target = tab.getAttribute("data-tab-target");
+        panel.querySelectorAll("[data-tab-target]").forEach((item) => {
+          const isActive = item === tab;
+          item.classList.toggle("is-active", isActive);
+          item.setAttribute("aria-selected", String(isActive));
+        });
+        panel.querySelectorAll("[data-tab-panel]").forEach((item) => {
+          const isActive = item.getAttribute("data-tab-panel") === target;
+          item.classList.toggle("is-active", isActive);
+          item.hidden = !isActive;
+        });
+      });
+    });
     panel.querySelectorAll("input").forEach((input) => input.addEventListener("input", render));
     render();
   }

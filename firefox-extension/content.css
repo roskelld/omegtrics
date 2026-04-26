@@ -30,6 +30,45 @@
   color: var(--muted-color, #999);
 }
 
+.omegtrics-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 12px 0 14px;
+  border-bottom: 1px solid var(--border-color, #3d4654);
+}
+
+.omegtrics-tab {
+  min-height: 36px;
+  padding: 8px 14px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: var(--muted-color, #999);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+.omegtrics-tab:hover {
+  color: var(--body-color, #ddd);
+}
+
+.omegtrics-tab.is-active {
+  border-color: var(--border-color, #3d4654);
+  background: var(--body-bg-color, #161920);
+  color: var(--contrast-color, #fff);
+  transform: translateY(1px);
+}
+
+.omegtrics-tab-panel {
+  padding-top: 2px;
+}
+
+.omegtrics-tab-panel[hidden] {
+  display: none;
+}
+
 .omegtrics-summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -126,6 +165,23 @@
   margin: 12px 0 0;
   padding-left: 12px;
   border-left: 3px solid var(--link-color, #00aff4);
+  color: var(--muted-color, #999);
+}
+
+.omegtrics-empty-state {
+  padding: 18px;
+  border: 1px dashed var(--border-color, #3d4654);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--body-bg-color, #161920) 82%, #ffffff 6%);
+}
+
+.omegtrics-empty-state h3 {
+  margin: 0 0 6px;
+  font-size: 17px;
+}
+
+.omegtrics-empty-state p {
+  margin: 0;
   color: var(--muted-color, #999);
 }
 
