@@ -5,18 +5,21 @@ Omegtrics
 Extract a visible SteamDB/Highcharts player-count SVG series into CSV.
 
 The script can either:
-  1) Render a SteamDB app chart page directly with Playwright, then extract the SVG data.
-  2) Parse a previously saved rendered HTML file for offline/debug use.
+  1) Parse a previously saved rendered SteamDB HTML file, write the CCU CSV, and generate a DAU report.
+  2) Render a SteamDB app chart page directly with Playwright on a best-effort basis.
 
 Examples:
-    # Live SteamDB fetch, defaults to --window 1w and 60-minute output rows.
-    python omegtrics.py players.csv --appid 3932890
+    # Offline SteamDB HTML input. Writes chart.csv and chart_dau_report.html.
+    python omegtrics.py --input-html chart.html
 
-    # Live SteamDB fetch for the 48 hour chart.
-    python omegtrics.py players_48h.csv --appid 3932890 --window 48h
+    # Override output paths and session assumptions.
+    python omegtrics.py --input-html chart.html --output-html report.html --session-hours 2.5
 
-    # Saved rendered HTML/debug input.
-    python omegtrics.py players.csv --input-html chart.html --interval-minutes 30
+    # CSV only, no DAU report.
+    python omegtrics.py players.csv --input-html chart.html --no-report
+
+    # Live SteamDB fetch, if access is available.
+    python omegtrics.py players.csv --appid 3932890 --window 48h
 
 Install:
     pip install beautifulsoup4 playwright
@@ -26,11 +29,13 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html as html_lib
+import json
 import math
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -88,6 +93,37 @@ class AxisRange:
 class TimeRange:
     start: datetime
     end: datetime
+
+
+@dataclass(frozen=True)
+class CCURow:
+    timestamp: datetime
+    players: int
+
+
+@dataclass(frozen=True)
+class GameMetadata:
+    name: str
+    appid: str
+    developer: str
+    publisher: str
+    primary_genre: str
+    store_genres: list[str]
+    tags: list[str]
+    description: str
+
+
+@dataclass(frozen=True)
+class DailyEstimate:
+    day: date
+    coverage_hours: float
+    average_ccu: float
+    peak_ccu: int
+    player_hours: float
+    dau_low: int
+    dau_mid: int
+    dau_high: int
+    confidence: str
 
 
 def build_steamdb_chart_url(appid: str, window: str) -> str:
@@ -528,9 +564,371 @@ def write_csv(output_csv: Path, rows: list[tuple[str, int]]) -> None:
         writer.writerows(rows)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Extract a SteamDB Highcharts player-count timeline into CSV.")
-    parser.add_argument("output_csv", type=Path, help="CSV file to write")
+def parse_iso_datetime(value: str) -> datetime:
+    if value.endswith("Z"):
+        value = f"{value[:-1]}+00:00"
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def read_ccu_csv(path: Path) -> list[CCURow]:
+    rows: list[CCURow] = []
+    with path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if not reader.fieldnames or "timestamp_utc" not in reader.fieldnames or "players" not in reader.fieldnames:
+            raise OmegtricsError("CCU CSV must contain timestamp_utc and players columns.")
+        for line_number, row in enumerate(reader, start=2):
+            try:
+                rows.append(CCURow(parse_iso_datetime(row["timestamp_utc"]), int(row["players"])))
+            except Exception as exc:
+                raise OmegtricsError(f"Invalid CCU CSV row {line_number}: {row}") from exc
+
+    rows.sort(key=lambda item: item.timestamp)
+    if len(rows) < 2:
+        raise OmegtricsError("CCU CSV must contain at least two rows.")
+    return rows
+
+
+def clean_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def clean_tag(value: str) -> str:
+    value = clean_text(value)
+    return re.sub(r"^[^\w&+-]+", "", value).strip()
+
+
+def table_value(soup: BeautifulSoup, label: str) -> str:
+    for tr in soup.select("tr"):
+        cells = tr.find_all("td")
+        if len(cells) >= 2 and clean_text(cells[0].get_text(" ", strip=True)).lower() == label.lower():
+            return clean_text(cells[1].get_text(" ", strip=True))
+    return ""
+
+
+def split_genres(value: str) -> list[str]:
+    genres: list[str] = []
+    for part in value.split(","):
+        name = re.sub(r"\s*\(\d+\)\s*", "", part).strip()
+        if name:
+            genres.append(name)
+    return genres
+
+
+def extract_game_metadata(html: Optional[str]) -> GameMetadata:
+    if not html:
+        return GameMetadata("", "", "", "", "", [], [], "")
+
+    soup = BeautifulSoup(html, "html.parser")
+    name_tag = soup.select_one("h1[itemprop='name']")
+    title_tag = soup.find("meta", attrs={"property": "og:title"}) or soup.find("title")
+    description_tag = soup.find("meta", attrs={"name": "description"}) or soup.find("meta", attrs={"property": "og:description"})
+
+    raw_name = clean_text(name_tag.get_text(" ", strip=True)) if name_tag else ""
+    if not raw_name and title_tag:
+        raw_name = clean_text(title_tag.get("content", "") if title_tag.name == "meta" else title_tag.get_text(" ", strip=True))
+        raw_name = re.sub(r"\s+Steam Charts\s*(?:. SteamDB)?$", "", raw_name)
+
+    tags = [clean_tag(a.get_text(" ", strip=True)) for a in soup.select(".store-tags a")]
+    tags = [tag for tag in tags if tag]
+
+    return GameMetadata(
+        name=raw_name,
+        appid=table_value(soup, "App ID"),
+        developer=table_value(soup, "Developer"),
+        publisher=table_value(soup, "Publisher"),
+        primary_genre=split_genres(table_value(soup, "Primary Genre"))[0] if split_genres(table_value(soup, "Primary Genre")) else "",
+        store_genres=split_genres(table_value(soup, "Store Genres")),
+        tags=tags,
+        description=clean_text(description_tag.get("content", "")) if description_tag else "",
+    )
+
+
+def infer_session_hours(metadata: GameMetadata) -> tuple[float, float, float, str]:
+    labels = " ".join([metadata.primary_genre, *metadata.store_genres, *metadata.tags]).lower()
+    if any(term in labels for term in ("extraction shooter", "survival", "tactical", "looter shooter", "mmo")):
+        return 1.25, 2.0, 3.0, "Genre/tags imply longer, repeat-session PC play, so the default model uses a 2.0 hour midpoint with 1.25-3.0 hour sensitivity."
+    if any(term in labels for term in ("strategy", "simulation", "rpg")):
+        return 1.5, 2.25, 3.5, "Genre/tags imply longer-form sessions, so the default model uses a 2.25 hour midpoint with 1.5-3.5 hour sensitivity."
+    if any(term in labels for term in ("casual", "puzzle", "arcade")):
+        return 0.5, 1.0, 1.75, "Genre/tags imply shorter sessions, so the default model uses a 1.0 hour midpoint with 0.5-1.75 hour sensitivity."
+    return 1.0, 1.75, 2.75, "No strong session-length signal was found, so the default model uses a broad PC game range."
+
+
+def median_interval_hours(rows: list[CCURow]) -> float:
+    deltas = [
+        (b.timestamp - a.timestamp).total_seconds() / 3600.0
+        for a, b in zip(rows, rows[1:])
+        if b.timestamp > a.timestamp
+    ]
+    if not deltas:
+        return 1.0
+    deltas.sort()
+    return deltas[len(deltas) // 2]
+
+
+def estimate_daily_dau(
+    rows: list[CCURow],
+    session_low_hours: float,
+    session_mid_hours: float,
+    session_high_hours: float,
+) -> list[DailyEstimate]:
+    if session_low_hours <= 0 or session_mid_hours <= 0 or session_high_hours <= 0:
+        raise OmegtricsError("Session-hour assumptions must be greater than 0.")
+    if not (session_low_hours <= session_mid_hours <= session_high_hours):
+        raise OmegtricsError("Expected session-low <= session-hours <= session-high.")
+
+    fallback_delta = median_interval_hours(rows)
+    buckets: dict[date, dict[str, float]] = {}
+    for index, row in enumerate(rows):
+        if index + 1 < len(rows):
+            delta_hours = (rows[index + 1].timestamp - row.timestamp).total_seconds() / 3600.0
+        else:
+            delta_hours = fallback_delta
+        if delta_hours <= 0:
+            continue
+        delta_hours = min(delta_hours, 6.0)
+        day = row.timestamp.date()
+        bucket = buckets.setdefault(day, {"coverage": 0.0, "player_hours": 0.0, "peak": 0.0})
+        bucket["coverage"] += delta_hours
+        bucket["player_hours"] += row.players * delta_hours
+        bucket["peak"] = max(bucket["peak"], row.players)
+
+    estimates: list[DailyEstimate] = []
+    for day, bucket in sorted(buckets.items()):
+        coverage = bucket["coverage"]
+        player_hours = bucket["player_hours"]
+        average_ccu = player_hours / coverage if coverage else 0.0
+        confidence = "higher" if coverage >= 20 else "partial day"
+        estimates.append(
+            DailyEstimate(
+                day=day,
+                coverage_hours=coverage,
+                average_ccu=average_ccu,
+                peak_ccu=round(bucket["peak"]),
+                player_hours=player_hours,
+                dau_low=round(player_hours / session_high_hours),
+                dau_mid=round(player_hours / session_mid_hours),
+                dau_high=round(player_hours / session_low_hours),
+                confidence=confidence,
+            )
+        )
+    return estimates
+
+
+def fmt_int(value: float) -> str:
+    return f"{round(value):,}"
+
+
+def fmt_float(value: float, digits: int = 1) -> str:
+    return f"{value:,.{digits}f}"
+
+
+def html_escape(value: object) -> str:
+    return html_lib.escape(str(value), quote=True)
+
+
+def make_svg_polyline(values: list[int], width: int = 760, height: int = 170) -> str:
+    if not values:
+        return ""
+    max_value = max(values) or 1
+    if len(values) == 1:
+        points = f"0,{height - (values[0] / max_value) * height:.1f}"
+    else:
+        points = " ".join(
+            f"{(index / (len(values) - 1)) * width:.1f},{height - (value / max_value) * height:.1f}"
+            for index, value in enumerate(values)
+        )
+    return (
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="Daily DAU midpoint trend">'
+        f'<polyline points="{points}" fill="none" stroke="#2563eb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>'
+        f'<line x1="0" y1="{height - 1}" x2="{width}" y2="{height - 1}" stroke="#d1d5db" stroke-width="1"/>'
+        "</svg>"
+    )
+
+
+def render_dau_report(
+    output_html: Path,
+    ccu_csv: Path,
+    metadata: GameMetadata,
+    estimates: list[DailyEstimate],
+    session_low_hours: float,
+    session_mid_hours: float,
+    session_high_hours: float,
+    assumption_note: str,
+) -> None:
+    if not estimates:
+        raise OmegtricsError("No daily estimates were produced.")
+
+    complete_days = [item for item in estimates if item.coverage_hours >= 20]
+    headline_days = complete_days or estimates
+    latest = headline_days[-1]
+    avg_mid = sum(item.dau_mid for item in headline_days) / len(headline_days)
+    avg_low = sum(item.dau_low for item in headline_days) / len(headline_days)
+    avg_high = sum(item.dau_high for item in headline_days) / len(headline_days)
+    total_player_hours = sum(item.player_hours for item in headline_days)
+    peak_ccu = max(item.peak_ccu for item in estimates)
+    midpoint_values = [item.dau_mid for item in estimates]
+
+    metadata_rows = [
+        ("App", metadata.name or "Unknown"),
+        ("App ID", metadata.appid or "Unknown"),
+        ("Developer", metadata.developer or "Unknown"),
+        ("Publisher", metadata.publisher or "Unknown"),
+        ("Primary genre", metadata.primary_genre or "Unknown"),
+        ("Store genres", ", ".join(metadata.store_genres) or "Unknown"),
+        ("Tags used", ", ".join(metadata.tags[:8]) or "Unknown"),
+    ]
+    metadata_html = "\n".join(
+        f"<tr><th>{html_escape(label)}</th><td>{html_escape(value)}</td></tr>"
+        for label, value in metadata_rows
+    )
+    daily_rows = "\n".join(
+        "<tr>"
+        f"<td>{html_escape(item.day.isoformat())}</td>"
+        f"<td>{fmt_float(item.coverage_hours)}</td>"
+        f"<td>{fmt_int(item.average_ccu)}</td>"
+        f"<td>{fmt_int(item.peak_ccu)}</td>"
+        f"<td>{fmt_int(item.player_hours)}</td>"
+        f"<td>{fmt_int(item.dau_low)}-{fmt_int(item.dau_high)}</td>"
+        f"<td>{fmt_int(item.dau_mid)}</td>"
+        f"<td>{html_escape(item.confidence)}</td>"
+        "</tr>"
+        for item in estimates
+    )
+
+    payload = {
+        "source_csv": str(ccu_csv),
+        "session_low_hours": session_low_hours,
+        "session_mid_hours": session_mid_hours,
+        "session_high_hours": session_high_hours,
+        "daily_estimates": [item.__dict__ | {"day": item.day.isoformat()} for item in estimates],
+    }
+    payload_json = json.dumps(payload, indent=2).replace("</", "<\\/")
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html_escape(metadata.name or "Omegtrics")} DAU Estimate</title>
+<style>
+:root {{ color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; color: #172033; background: #f6f7f9; }}
+body {{ margin: 0; }}
+main {{ max-width: 1120px; margin: 0 auto; padding: 32px 24px 56px; }}
+h1 {{ margin: 0 0 6px; font-size: 34px; letter-spacing: 0; }}
+h2 {{ margin: 30px 0 12px; font-size: 20px; }}
+p {{ color: #4b5563; line-height: 1.5; }}
+.summary {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 24px 0; }}
+.metric {{ background: #fff; border: 1px solid #dde1e7; border-radius: 8px; padding: 16px; }}
+.metric strong {{ display: block; font-size: 26px; color: #0f172a; margin-top: 6px; }}
+.label {{ color: #667085; font-size: 13px; }}
+.panel {{ background: #fff; border: 1px solid #dde1e7; border-radius: 8px; padding: 18px; margin-top: 16px; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+th, td {{ text-align: left; padding: 10px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
+th {{ color: #475467; font-weight: 650; }}
+.chart {{ height: 190px; }}
+.chart svg {{ width: 100%; height: 100%; display: block; }}
+.note {{ border-left: 4px solid #2563eb; padding-left: 14px; }}
+code {{ background: #eef2f7; padding: 2px 5px; border-radius: 4px; }}
+@media (max-width: 820px) {{ .summary {{ grid-template-columns: 1fr 1fr; }} main {{ padding: 22px 14px 40px; }} table {{ font-size: 13px; }} }}
+@media (max-width: 520px) {{ .summary {{ grid-template-columns: 1fr; }} }}
+</style>
+</head>
+<body>
+<main>
+<h1>{html_escape(metadata.name or "Game")} DAU Estimate</h1>
+<p>Estimated daily active users from hourly concurrent player counts. This is a model, not an observed user count.</p>
+
+<section class="summary" aria-label="Summary metrics">
+<div class="metric"><span class="label">Latest DAU estimate</span><strong>{fmt_int(latest.dau_mid)}</strong><span class="label">{fmt_int(latest.dau_low)}-{fmt_int(latest.dau_high)} range</span></div>
+<div class="metric"><span class="label">Average DAU estimate</span><strong>{fmt_int(avg_mid)}</strong><span class="label">{fmt_int(avg_low)}-{fmt_int(avg_high)} range</span></div>
+<div class="metric"><span class="label">Peak CCU in sample</span><strong>{fmt_int(peak_ccu)}</strong><span class="label">highest hourly point</span></div>
+<div class="metric"><span class="label">Player-hours analysed</span><strong>{fmt_int(total_player_hours)}</strong><span class="label">{len(headline_days)} day(s)</span></div>
+</section>
+
+<section class="panel">
+<h2>How To Read This</h2>
+<p class="note">The report sums each day's CCU into player-hours, then divides by average session length. Shorter assumed sessions produce a higher DAU estimate because more unique people are needed to create the same number of concurrent player-hours.</p>
+<p>Current assumption: average session length is <strong>{fmt_float(session_mid_hours, 2)} hours</strong>, with sensitivity from <strong>{fmt_float(session_low_hours, 2)}</strong> to <strong>{fmt_float(session_high_hours, 2)}</strong> hours. {html_escape(assumption_note)}</p>
+</section>
+
+<section class="panel chart">
+{make_svg_polyline(midpoint_values)}
+</section>
+
+<section class="panel">
+<h2>Daily Estimates</h2>
+<table>
+<thead><tr><th>Date UTC</th><th>Coverage h</th><th>Avg CCU</th><th>Peak CCU</th><th>Player-hours</th><th>DAU range</th><th>DAU midpoint</th><th>Confidence</th></tr></thead>
+<tbody>
+{daily_rows}
+</tbody>
+</table>
+</section>
+
+<section class="panel">
+<h2>Game Context</h2>
+<table><tbody>{metadata_html}</tbody></table>
+<p>{html_escape(metadata.description)}</p>
+</section>
+
+<script type="application/json" id="omegtrics-data">{payload_json}</script>
+</main>
+</body>
+</html>
+"""
+    output_html.write_text(html, encoding="utf-8")
+
+
+def derived_output_csv(input_html: Optional[Path], explicit_output: Optional[Path]) -> Path:
+    if explicit_output is not None:
+        return explicit_output
+    if input_html is not None:
+        return input_html.with_suffix(".csv")
+    return Path("players.csv")
+
+
+def derived_report_html(output_csv: Path, explicit_report: Optional[Path]) -> Path:
+    if explicit_report is not None:
+        return explicit_report
+    return output_csv.with_name(f"{output_csv.stem}_dau_report.html")
+
+
+def generate_dau_report_from_rows(
+    rows: list[tuple[str, int]],
+    output_csv: Path,
+    output_html: Path,
+    source_html: Optional[str],
+    session_low: Optional[float],
+    session_mid: Optional[float],
+    session_high: Optional[float],
+) -> tuple[list[DailyEstimate], float, float, float]:
+    ccu_rows = [CCURow(parse_iso_datetime(timestamp), players) for timestamp, players in rows]
+    metadata = extract_game_metadata(source_html)
+    inferred_low, inferred_mid, inferred_high, assumption_note = infer_session_hours(metadata)
+    resolved_low = session_low if session_low is not None else inferred_low
+    resolved_mid = session_mid if session_mid is not None else inferred_mid
+    resolved_high = session_high if session_high is not None else inferred_high
+    estimates = estimate_daily_dau(ccu_rows, resolved_low, resolved_mid, resolved_high)
+    render_dau_report(
+        output_html=output_html,
+        ccu_csv=output_csv,
+        metadata=metadata,
+        estimates=estimates,
+        session_low_hours=resolved_low,
+        session_mid_hours=resolved_mid,
+        session_high_hours=resolved_high,
+        assumption_note=assumption_note,
+    )
+    return estimates, resolved_low, resolved_mid, resolved_high
+
+
+def run_extract(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Extract SteamDB player-count data and generate an offline DAU report.")
+    parser.add_argument("output_csv", nargs="?", type=Path, help="Optional CSV file to write; defaults from --input-html name or players.csv")
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--appid", help="Steam numeric app id, e.g. 3932890")
     source.add_argument("--input-html", type=Path, help="Previously saved rendered HTML file")
@@ -543,14 +941,22 @@ def main() -> None:
     parser.add_argument("--debug-dir", type=Path, help="Debug: save HTML/screenshot when SteamDB blocks access or the chart cannot be found")
     parser.add_argument("--headed", action="store_true", help="Show the Chromium browser window while loading SteamDB")
     parser.add_argument("--timeout-ms", type=int, default=45_000, help="Browser/page timeout in milliseconds")
-    args = parser.parse_args()
+    parser.add_argument("--output-html", type=Path, help="DAU report HTML to write; defaults to <csv-stem>_dau_report.html")
+    parser.add_argument("--no-report", action="store_true", help="Only write the extracted CSV; skip DAU report generation")
+    parser.add_argument("--session-hours", type=float, help="Average session length midpoint in hours for DAU estimate")
+    parser.add_argument("--session-low", type=float, help="Lower session-length bound in hours; produces high DAU")
+    parser.add_argument("--session-high", type=float, help="Upper session-length bound in hours; produces low DAU")
+    args = parser.parse_args(argv)
 
     if args.interval_minutes <= 0:
         parser.error("--interval-minutes must be greater than 0")
 
     try:
+        output_csv = derived_output_csv(args.input_html, args.output_csv)
+        source_html = None
         if args.input_html:
             html = args.input_html.read_text(encoding="utf-8")
+            source_html = html
         else:
             html = render_steamdb_chart_html(
                 appid=args.appid,
@@ -567,15 +973,30 @@ def main() -> None:
             start=args.start,
             end=args.end,
             year=args.year,
-        )
-        write_csv(args.output_csv, rows)
+            )
+        write_csv(output_csv, rows)
 
-        print(f"Wrote {len(rows)} rows to {args.output_csv}")
+        print(f"Wrote {len(rows)} rows to {output_csv}")
         if args.appid:
             print(f"Source URL: {build_steamdb_chart_url(args.appid, args.window)}")
         print(f"Detected time range: {tr.start.isoformat()} to {tr.end.isoformat()}")
         print(f"Detected y range: {y_range.min_value:g} to {y_range.max_value:g}")
         print(f"First row: {rows[0][0]}, {rows[0][1]}")
+        if not args.no_report:
+            output_html = derived_report_html(output_csv, args.output_html)
+            estimates, session_low, session_mid, session_high = generate_dau_report_from_rows(
+                rows=rows,
+                output_csv=output_csv,
+                output_html=output_html,
+                source_html=source_html,
+                session_low=args.session_low,
+                session_mid=args.session_hours,
+                session_high=args.session_high,
+            )
+            latest = [item for item in estimates if item.coverage_hours >= 20] or estimates
+            print(f"Wrote DAU report to {output_html}")
+            print(f"Latest DAU estimate: {fmt_int(latest[-1].dau_mid)} ({fmt_int(latest[-1].dau_low)}-{fmt_int(latest[-1].dau_high)})")
+            print(f"Session assumption: {fmt_float(session_mid, 2)}h midpoint ({fmt_float(session_low, 2)}-{fmt_float(session_high, 2)}h range)")
     except OmegtricsError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -583,6 +1004,54 @@ def main() -> None:
         print(f"ERROR: Unexpected failure: {exc}", file=sys.stderr)
         print("Run again with --debug-dir debug_steamdb if the failure happens while loading SteamDB.", file=sys.stderr)
         sys.exit(1)
+
+
+def run_report(argv: Optional[list[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Generate an offline DAU estimate report from hourly CCU CSV data.")
+    parser.add_argument("--ccu-csv", type=Path, required=True, help="Hourly CCU CSV from Omegtrics extraction")
+    parser.add_argument("--input-html", type=Path, help="Optional saved SteamDB HTML for game metadata and genre/tags")
+    parser.add_argument("--output-html", type=Path, default=Path("dau_report.html"), help="HTML report to write")
+    parser.add_argument("--session-hours", type=float, help="Average session length midpoint in hours")
+    parser.add_argument("--session-low", type=float, help="Lower session-length bound in hours; produces high DAU")
+    parser.add_argument("--session-high", type=float, help="Upper session-length bound in hours; produces low DAU")
+    args = parser.parse_args(argv)
+
+    try:
+        rows = read_ccu_csv(args.ccu_csv)
+        source_html = args.input_html.read_text(encoding="utf-8") if args.input_html else None
+        metadata = extract_game_metadata(source_html)
+        inferred_low, inferred_mid, inferred_high, assumption_note = infer_session_hours(metadata)
+        session_low = args.session_low if args.session_low is not None else inferred_low
+        session_mid = args.session_hours if args.session_hours is not None else inferred_mid
+        session_high = args.session_high if args.session_high is not None else inferred_high
+        estimates = estimate_daily_dau(rows, session_low, session_mid, session_high)
+        render_dau_report(
+            output_html=args.output_html,
+            ccu_csv=args.ccu_csv,
+            metadata=metadata,
+            estimates=estimates,
+            session_low_hours=session_low,
+            session_mid_hours=session_mid,
+            session_high_hours=session_high,
+            assumption_note=assumption_note,
+        )
+        latest = [item for item in estimates if item.coverage_hours >= 20] or estimates
+        print(f"Wrote DAU report to {args.output_html}")
+        print(f"Latest DAU estimate: {fmt_int(latest[-1].dau_mid)} ({fmt_int(latest[-1].dau_low)}-{fmt_int(latest[-1].dau_high)})")
+        print(f"Session assumption: {fmt_float(session_mid, 2)}h midpoint ({fmt_float(session_low, 2)}-{fmt_float(session_high, 2)}h range)")
+    except OmegtricsError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"ERROR: Unexpected failure: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "report":
+        run_report(sys.argv[2:])
+    else:
+        run_extract()
 
 
 if __name__ == "__main__":
