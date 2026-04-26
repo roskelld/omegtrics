@@ -1,0 +1,22 @@
+{
+  "manifest_version": 2,
+  "name": "Omegtrics SteamDB DAU",
+  "version": "0.1.0",
+  "description": "Adds Omegtrics DAU estimates directly to SteamDB app chart pages.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://steamdb.info/app/*/charts/*",
+        "https://steamdb.info/app/*/charts/"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "omegtrics-steamdb-dau@local"
+    }
+  }
+}
