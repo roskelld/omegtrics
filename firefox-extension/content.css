@@ -30,6 +30,14 @@
   color: var(--muted-color, #999);
 }
 
+.omegtrics-range {
+  flex: 0 0 auto;
+  color: var(--muted-color, #999);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: right;
+}
+
 .omegtrics-tabs {
   display: flex;
   gap: 4px;
@@ -74,6 +82,10 @@
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
   margin: 14px 0;
+}
+
+.omegtrics-summary-compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .omegtrics-metric {
@@ -204,6 +216,44 @@
   background: var(--link-color, #00aff4);
 }
 
+.omegtrics-retention-chart {
+  display: flex;
+  align-items: end;
+  gap: 6px;
+  height: 150px;
+  margin: 14px 0;
+  padding: 10px 8px 22px;
+  border: 1px solid var(--border-color-2, #263243);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--body-bg-color, #161920) 80%, #ffffff 6%);
+}
+
+.omegtrics-retention-day {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  align-items: end;
+  justify-content: center;
+  height: 100%;
+  min-width: 18px;
+}
+
+.omegtrics-retention-bar {
+  width: 100%;
+  max-width: 28px;
+  min-height: 3px;
+  border-radius: 5px 5px 0 0;
+  background: var(--link-color, #00aff4);
+}
+
+.omegtrics-retention-day span {
+  position: absolute;
+  bottom: -18px;
+  color: var(--muted-color, #999);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 .omegtrics-empty-state {
   padding: 18px;
   border: 1px dashed var(--border-color, #3d4654);
@@ -236,6 +286,7 @@
   }
 
   .omegtrics-summary,
+  .omegtrics-summary-compact,
   .omegtrics-controls {
     grid-template-columns: 1fr;
   }

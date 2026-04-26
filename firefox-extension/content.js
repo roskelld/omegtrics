@@ -220,6 +220,49 @@
     return rows;
   }
 
+  function normalizeHighchartsPoint(point) {
+    if (Array.isArray(point) && point.length >= 2) {
+      return { timestamp: new Date(Number(point[0])), players: Math.round(Number(point[1])) };
+    }
+    if (point && typeof point === "object") {
+      const x = Number(point.x ?? point[0]);
+      const y = Number(point.y ?? point[1]);
+      return { timestamp: new Date(x), players: Math.round(y) };
+    }
+    return null;
+  }
+
+  function highchartsRowsFromPage(chartElement) {
+    try {
+      const pageWindow = window.wrappedJSObject || window;
+      const charts = Array.from(pageWindow.Highcharts?.charts || []).filter(Boolean);
+      const containerId = chartElement.querySelector(".highcharts-container")?.id;
+      const chart = charts.find((item) => item?.renderTo?.id === containerId) || charts.find((item) => item?.renderTo && chartElement.contains(item.renderTo));
+      if (!chart) return [];
+
+      const series = Array.from(chart.series || [])
+        .filter((item) => !item.options?.showInNavigator && !/navigator|flags/i.test(`${item.type || ""} ${item.name || ""}`))
+        .sort((a, b) => {
+          const score = (item) => (/^players$/i.test(item.name || "") ? 100 : 0) + (/area/i.test(item.type || "") ? 20 : 0);
+          return score(b) - score(a);
+        })[0];
+      if (!series) return [];
+
+      let points = [];
+      if (Array.isArray(series.options?.data) && series.options.data.length > 2) {
+        points = series.options.data.map(normalizeHighchartsPoint);
+      } else if (Array.isArray(series.data) && series.data.length > 2) {
+        points = series.data.map(normalizeHighchartsPoint);
+      }
+
+      return points
+        .filter((point) => point && Number.isFinite(point.timestamp.getTime()) && Number.isFinite(point.players))
+        .sort((a, b) => a.timestamp - b.timestamp);
+    } catch (_error) {
+      return [];
+    }
+  }
+
   function metadataFromPage() {
     const rowValue = (label) => {
       for (const row of document.querySelectorAll("tr")) {
@@ -405,61 +448,186 @@
       </div>`;
   }
 
-  function renderPanel(container, metadata, ccuRows, initialSession) {
+  function dailyActivity(rows) {
+    const buckets = new Map();
+    const fallback = medianIntervalHours(rows);
+    for (let i = 0; i < rows.length; i += 1) {
+      let delta = i + 1 < rows.length ? (rows[i + 1].timestamp - rows[i].timestamp) / 3600000 : fallback;
+      if (delta <= 0) continue;
+      delta = Math.min(delta, 6);
+      const day = rows[i].timestamp.toISOString().slice(0, 10);
+      const bucket = buckets.get(day) || { day, coverage: 0, playerHours: 0, peak: 0, low: Number.POSITIVE_INFINITY };
+      bucket.coverage += delta;
+      bucket.playerHours += rows[i].players * delta;
+      bucket.peak = Math.max(bucket.peak, rows[i].players);
+      bucket.low = Math.min(bucket.low, rows[i].players);
+      buckets.set(day, bucket);
+    }
+    return Array.from(buckets.values())
+      .map((bucket) => ({
+        ...bucket,
+        avgCcu: bucket.coverage ? bucket.playerHours / bucket.coverage : 0,
+        low: Number.isFinite(bucket.low) ? bucket.low : 0,
+        complete: bucket.coverage >= 20
+      }))
+      .sort((a, b) => a.day.localeCompare(b.day));
+  }
+
+  function average(items, selector) {
+    if (!items.length) return 0;
+    return items.reduce((sum, item) => sum + selector(item), 0) / items.length;
+  }
+
+  function retentionStatus(momentum) {
+    if (!Number.isFinite(momentum) || momentum === 0) return "Needs more history";
+    if (momentum >= 1.05) return "Growing";
+    if (momentum >= 0.9) return "Stable";
+    if (momentum >= 0.7) return "Softening";
+    return "Declining";
+  }
+
+  function makeRetentionBars(days) {
+    const recent = days.slice(-14);
+    const max = Math.max(...recent.map((day) => day.avgCcu), 1);
+    return recent
+      .map((day) => {
+        const height = Math.max((day.avgCcu / max) * 100, 3);
+        return `<div class="omegtrics-retention-day" title="${day.day}: ${fmt(day.avgCcu)} avg CCU">
+          <div class="omegtrics-retention-bar" style="height:${height.toFixed(1)}%"></div>
+          <span>${day.day.slice(5)}</span>
+        </div>`;
+      })
+      .join("");
+  }
+
+  function makeRetentionHtml(rows, sourceLabel) {
+    const days = dailyActivity(rows);
+    const completeDays = days.filter((day) => day.complete);
+    const analysisDays = completeDays.length >= 3 ? completeDays : days;
+    const latest = analysisDays.slice(-7);
+    const previous = analysisDays.slice(-14, -7);
+    const latestAvg = average(latest, (day) => day.avgCcu);
+    const previousAvg = average(previous, (day) => day.avgCcu);
+    const momentum = previousAvg ? latestAvg / previousAvg : 0;
+    const peakDay = analysisDays.reduce((best, day) => (day.avgCcu > (best?.avgCcu || 0) ? day : best), null);
+    const peakRetention = peakDay?.avgCcu ? latestAvg / peakDay.avgCcu : 0;
+    const consistency = average(latest, (day) => (day.peak ? day.low / day.peak : 0));
+    const status = retentionStatus(momentum);
+    const historyLabel = sourceLabel === "highcharts-full" ? "Highcharts page data" : "Visible chart range";
+    const confidence = sourceLabel === "highcharts-full" && analysisDays.length >= 14 ? "broader history" : "limited range";
+    const rowsHtml = analysisDays
+      .slice(-14)
+      .map((day) => `<tr>
+        <td>${day.day}</td>
+        <td>${day.coverage.toFixed(1)}</td>
+        <td>${fmt(day.avgCcu)}</td>
+        <td>${fmt(day.peak)}</td>
+        <td>${fmt(day.low)}</td>
+        <td>${day.peak ? Math.round((day.low / day.peak) * 100) : 0}%</td>
+      </tr>`)
+      .join("");
+
+    return `
+      <div class="omegtrics-summary">
+        <div class="omegtrics-metric"><span class="omegtrics-label">Retention signal</span><span class="omegtrics-value">${status}</span><span class="omegtrics-label">${confidence}</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Recent avg CCU</span><span class="omegtrics-value">${fmt(latestAvg)}</span><span class="omegtrics-label">latest ${latest.length} day(s)</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Vs previous period</span><span class="omegtrics-value">${previousAvg ? `${Math.round(momentum * 100)}%` : "n/a"}</span><span class="omegtrics-label">${previousAvg ? `${fmt(previousAvg)} prior avg` : "needs more days"}</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Vs peak day</span><span class="omegtrics-value">${peakRetention ? `${Math.round(peakRetention * 100)}%` : "n/a"}</span><span class="omegtrics-label">${peakDay ? peakDay.day : "needs history"}</span></div>
+      </div>
+      <div class="omegtrics-retention-chart">${makeRetentionBars(analysisDays)}</div>
+      <p class="omegtrics-note">This is not cohort retention. It is a CCU retention proxy: recent average activity compared with the previous period and the best day in the available history. Data source: ${historyLabel}.</p>
+      <div class="omegtrics-summary omegtrics-summary-compact">
+        <div class="omegtrics-metric"><span class="omegtrics-label">Daily floor consistency</span><span class="omegtrics-value">${Math.round(consistency * 100)}%</span><span class="omegtrics-label">avg trough / peak</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Days analysed</span><span class="omegtrics-value">${analysisDays.length}</span><span class="omegtrics-label">${completeDays.length} complete</span></div>
+      </div>
+      <div class="omegtrics-table-wrap">
+        <table class="omegtrics-table">
+          <thead><tr><th>Date UTC</th><th>Coverage h</th><th>Avg CCU</th><th>Peak CCU</th><th>Low CCU</th><th>Floor</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>`;
+  }
+
+  function activeTab(panel) {
+    return panel?.querySelector("[data-tab-target].is-active")?.getAttribute("data-tab-target") || "dau";
+  }
+
+  function currentSession(panel, fallback) {
+    return {
+      low: Number(panel?.querySelector("[data-session-low]")?.value || fallback.low),
+      mid: Number(panel?.querySelector("[data-session-mid]")?.value || fallback.mid),
+      high: Number(panel?.querySelector("[data-session-high]")?.value || fallback.high)
+    };
+  }
+
+  function setActiveTab(panel, target) {
+    panel.querySelectorAll("[data-tab-target]").forEach((item) => {
+      const isActive = item.getAttribute("data-tab-target") === target;
+      item.classList.toggle("is-active", isActive);
+      item.setAttribute("aria-selected", String(isActive));
+    });
+    panel.querySelectorAll("[data-tab-panel]").forEach((item) => {
+      const isActive = item.getAttribute("data-tab-panel") === target;
+      item.classList.toggle("is-active", isActive);
+      item.hidden = !isActive;
+    });
+  }
+
+  function updatePanelData(panel, metadata, ccuRows, retentionRows, retentionSource, initialSession) {
+    const session = currentSession(panel, initialSession);
+    if (!(session.low > 0 && session.mid > 0 && session.high > 0 && session.low <= session.mid && session.mid <= session.high)) {
+      panel.querySelector("[data-dau-results]").innerHTML = '<div class="omegtrics-error">Session inputs must satisfy low <= midpoint <= high.</div>';
+      return;
+    }
+    const estimates = estimateDaily(ccuRows, session);
+    const headlineDays = estimates.filter((item) => item.coverage >= 20);
+    const basis = headlineDays.length ? headlineDays : estimates;
+    const latest = basis[basis.length - 1];
+    const avgMid = basis.reduce((sum, item) => sum + item.dauMid, 0) / basis.length;
+    const avgLow = basis.reduce((sum, item) => sum + item.dauLow, 0) / basis.length;
+    const avgHigh = basis.reduce((sum, item) => sum + item.dauHigh, 0) / basis.length;
+    const peak = Math.max(...estimates.map((item) => item.peak));
+    const playerHours = basis.reduce((sum, item) => sum + item.playerHours, 0);
+    const rowsHtml = estimates
+      .map((item) => `<tr>
+        <td>${item.day}</td>
+        <td>${item.coverage.toFixed(1)}</td>
+        <td>${fmt(item.avgCcu)}</td>
+        <td>${fmt(item.peak)}</td>
+        <td>${fmt(item.playerHours)}</td>
+        <td>${fmt(item.dauLow)}-${fmt(item.dauHigh)}</td>
+        <td>${fmt(item.dauMid)}</td>
+        <td>${item.confidence}</td>
+      </tr>`)
+      .join("");
+
+    panel.querySelector("[data-dau-results]").innerHTML = `
+      <div class="omegtrics-summary">
+        <div class="omegtrics-metric"><span class="omegtrics-label">Latest DAU estimate</span><span class="omegtrics-value">${fmt(latest.dauMid)}</span><span class="omegtrics-label">${fmt(latest.dauLow)}-${fmt(latest.dauHigh)} range</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Average DAU estimate</span><span class="omegtrics-value">${fmt(avgMid)}</span><span class="omegtrics-label">${fmt(avgLow)}-${fmt(avgHigh)} range</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Peak CCU in sample</span><span class="omegtrics-value">${fmt(peak)}</span><span class="omegtrics-label">highest chart point</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">Player-hours analysed</span><span class="omegtrics-value">${fmt(playerHours)}</span><span class="omegtrics-label">${basis.length} day(s)</span></div>
+      </div>
+      <div class="omegtrics-chart">${makeTrendSvg(estimates)}</div>
+      <p class="omegtrics-note">Omegtrics sums each day's CCU into player-hours, then divides by assumed average session length. Shorter sessions produce higher DAU estimates.</p>
+      <div class="omegtrics-table-wrap">
+        <table class="omegtrics-table">
+          <thead><tr><th>Date UTC</th><th>Coverage h</th><th>Avg CCU</th><th>Peak CCU</th><th>Player-hours</th><th>DAU range</th><th>DAU midpoint</th><th>Confidence</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>`;
+    panel.querySelector("[data-regions-results]").innerHTML = makeRegionsHtml(ccuRows);
+    panel.querySelector("[data-retention-results]").innerHTML = makeRetentionHtml(retentionRows, retentionSource);
+    panel.querySelector("[data-source-range]").textContent = `${ccuRows[0].timestamp.toISOString().slice(0, 10)} to ${ccuRows[ccuRows.length - 1].timestamp.toISOString().slice(0, 10)}`;
+    panel.querySelector(".omegtrics-subtitle").textContent = `${metadata.name || "SteamDB app"} · ${metadata.primaryGenre || "Unknown genre"} · ${metadata.tags.slice(0, 4).join(", ")}`;
+  }
+
+  function renderPanel(container, metadata, ccuRows, retentionRows, retentionSource, initialSession, previousState = {}) {
     document.getElementById(PANEL_ID)?.remove();
     const panel = document.createElement("section");
     panel.id = PANEL_ID;
     panel.className = "omegtrics-panel";
     container.insertAdjacentElement("afterend", panel);
-
-    const render = () => {
-      const session = {
-        low: Number(panel.querySelector("[data-session-low]")?.value || initialSession.low),
-        mid: Number(panel.querySelector("[data-session-mid]")?.value || initialSession.mid),
-        high: Number(panel.querySelector("[data-session-high]")?.value || initialSession.high)
-      };
-      if (!(session.low > 0 && session.mid > 0 && session.high > 0 && session.low <= session.mid && session.mid <= session.high)) {
-        panel.querySelector("[data-dau-results]").innerHTML = '<div class="omegtrics-error">Session inputs must satisfy low <= midpoint <= high.</div>';
-        return;
-      }
-      const estimates = estimateDaily(ccuRows, session);
-      const headlineDays = estimates.filter((item) => item.coverage >= 20);
-      const basis = headlineDays.length ? headlineDays : estimates;
-      const latest = basis[basis.length - 1];
-      const avgMid = basis.reduce((sum, item) => sum + item.dauMid, 0) / basis.length;
-      const avgLow = basis.reduce((sum, item) => sum + item.dauLow, 0) / basis.length;
-      const avgHigh = basis.reduce((sum, item) => sum + item.dauHigh, 0) / basis.length;
-      const peak = Math.max(...estimates.map((item) => item.peak));
-      const playerHours = basis.reduce((sum, item) => sum + item.playerHours, 0);
-      const rowsHtml = estimates
-        .map((item) => `<tr>
-          <td>${item.day}</td>
-          <td>${item.coverage.toFixed(1)}</td>
-          <td>${fmt(item.avgCcu)}</td>
-          <td>${fmt(item.peak)}</td>
-          <td>${fmt(item.playerHours)}</td>
-          <td>${fmt(item.dauLow)}-${fmt(item.dauHigh)}</td>
-          <td>${fmt(item.dauMid)}</td>
-          <td>${item.confidence}</td>
-        </tr>`)
-        .join("");
-
-      panel.querySelector("[data-dau-results]").innerHTML = `
-        <div class="omegtrics-summary">
-          <div class="omegtrics-metric"><span class="omegtrics-label">Latest DAU estimate</span><span class="omegtrics-value">${fmt(latest.dauMid)}</span><span class="omegtrics-label">${fmt(latest.dauLow)}-${fmt(latest.dauHigh)} range</span></div>
-          <div class="omegtrics-metric"><span class="omegtrics-label">Average DAU estimate</span><span class="omegtrics-value">${fmt(avgMid)}</span><span class="omegtrics-label">${fmt(avgLow)}-${fmt(avgHigh)} range</span></div>
-          <div class="omegtrics-metric"><span class="omegtrics-label">Peak CCU in sample</span><span class="omegtrics-value">${fmt(peak)}</span><span class="omegtrics-label">highest chart point</span></div>
-          <div class="omegtrics-metric"><span class="omegtrics-label">Player-hours analysed</span><span class="omegtrics-value">${fmt(playerHours)}</span><span class="omegtrics-label">${basis.length} day(s)</span></div>
-        </div>
-        <div class="omegtrics-chart">${makeTrendSvg(estimates)}</div>
-        <p class="omegtrics-note">Omegtrics sums each day's CCU into player-hours, then divides by assumed average session length. Shorter sessions produce higher DAU estimates.</p>
-        <div class="omegtrics-table-wrap">
-          <table class="omegtrics-table">
-            <thead><tr><th>Date UTC</th><th>Coverage h</th><th>Avg CCU</th><th>Peak CCU</th><th>Player-hours</th><th>DAU range</th><th>DAU midpoint</th><th>Confidence</th></tr></thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-        </div>`;
-    };
 
     panel.innerHTML = `
       <div class="omegtrics-header">
@@ -467,6 +635,7 @@
           <h2 class="omegtrics-title">Omegtrics</h2>
           <p class="omegtrics-subtitle">${metadata.name || "SteamDB app"} · ${metadata.primaryGenre || "Unknown genre"} · ${metadata.tags.slice(0, 4).join(", ")}</p>
         </div>
+        <span class="omegtrics-range">Chart: <span data-source-range></span></span>
       </div>
       <div class="omegtrics-tabs" role="tablist" aria-label="Omegtrics analysis views">
         <button type="button" class="omegtrics-tab is-active" role="tab" aria-selected="true" aria-controls="omegtrics-tab-dau" data-tab-target="dau">DAU</button>
@@ -484,7 +653,7 @@
         <div data-dau-results></div>
       </div>
       <div class="omegtrics-tab-panel" id="omegtrics-tab-regions" role="tabpanel" hidden data-tab-panel="regions">
-        ${makeRegionsHtml(ccuRows)}
+        <div data-regions-results></div>
       </div>
       <div class="omegtrics-tab-panel" id="omegtrics-tab-patterns" role="tabpanel" hidden data-tab-panel="patterns">
         <div class="omegtrics-empty-state">
@@ -493,10 +662,7 @@
         </div>
       </div>
       <div class="omegtrics-tab-panel" id="omegtrics-tab-retention" role="tabpanel" hidden data-tab-panel="retention">
-        <div class="omegtrics-empty-state">
-          <h3>Retention</h3>
-          <p>Upcoming view for engagement and repeat-play indicators derived from CCU shape.</p>
-        </div>
+        <div data-retention-results></div>
       </div>`;
     panel.querySelectorAll("[data-tab-target]").forEach((tab) => {
       tab.addEventListener("click", () => {
@@ -513,8 +679,14 @@
         });
       });
     });
-    panel.querySelectorAll("input").forEach((input) => input.addEventListener("input", render));
-    render();
+    panel.querySelectorAll("input").forEach((input) => input.addEventListener("input", () => updatePanelData(panel, metadata, ccuRows, retentionRows, retentionSource, initialSession)));
+    if (previousState.session) {
+      panel.querySelector("[data-session-low]").value = previousState.session.low;
+      panel.querySelector("[data-session-mid]").value = previousState.session.mid;
+      panel.querySelector("[data-session-high]").value = previousState.session.high;
+    }
+    setActiveTab(panel, previousState.tab || "dau");
+    updatePanelData(panel, metadata, ccuRows, retentionRows, retentionSource, initialSession);
   }
 
   function insertError(container, message) {
@@ -526,21 +698,69 @@
     container.insertAdjacentElement("afterend", error);
   }
 
+  function currentPanelState() {
+    const panel = document.getElementById(PANEL_ID);
+    if (!panel) return {};
+    return { tab: activeTab(panel), session: currentSession(panel, { low: 1.25, mid: 2, high: 3 }) };
+  }
+
+  function redrawPanel() {
+    const chart = findPlayerChart();
+    if (!chart || chartReadinessError(chart)) return false;
+    const container = chart.closest(".chart-container") || chart;
+    const previousState = currentPanelState();
+    try {
+      const ccuRows = extractHourlyCCU(chart);
+      const highchartsRows = highchartsRowsFromPage(chart);
+      const retentionRows = highchartsRows.length > ccuRows.length ? highchartsRows : ccuRows;
+      const retentionSource = highchartsRows.length > ccuRows.length ? "highcharts-full" : "visible-chart";
+      const metadata = metadataFromPage();
+      renderPanel(container, metadata, ccuRows, retentionRows, retentionSource, inferSessionHours(metadata), previousState);
+      return true;
+    } catch (error) {
+      insertError(container, error.message || String(error));
+      return false;
+    }
+  }
+
+  let refreshTimer = 0;
+  let chartObserver = null;
+
+  function scheduleRefresh(delay = 500) {
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => {
+      redrawPanel();
+    }, delay);
+  }
+
+  function watchChartRedraws(chart) {
+    if (chartObserver) chartObserver.disconnect();
+    chartObserver = new MutationObserver((mutations) => {
+      if (mutations.some((mutation) => mutation.target.closest?.(`#${PANEL_ID}`))) return;
+      scheduleRefresh(350);
+    });
+    chartObserver.observe(chart, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      attributeFilter: ["d", "class", "transform", "visibility", "selected"]
+    });
+
+    chart.querySelectorAll(".highcharts-range-selector-buttons .highcharts-button, select").forEach((control) => {
+      control.addEventListener("click", () => scheduleRefresh(900), true);
+      control.addEventListener("change", () => scheduleRefresh(900), true);
+    });
+  }
+
   function boot() {
     if (document.getElementById(PANEL_ID)) return true;
     const chart = findPlayerChart();
     if (!chart) return false;
     const container = chart.closest(".chart-container") || chart;
     if (chartReadinessError(chart)) return false;
-    try {
-      const ccuRows = extractHourlyCCU(chart);
-      const metadata = metadataFromPage();
-      renderPanel(container, metadata, ccuRows, inferSessionHours(metadata));
-    } catch (error) {
-      insertError(container, error.message || String(error));
-      return true;
-    }
-    return true;
+    const didRender = redrawPanel();
+    if (didRender) watchChartRedraws(chart);
+    return didRender;
   }
 
   function waitForChart() {
