@@ -11,4 +11,6 @@ __pycache__/
 # Omegtrics generated output
 /debug_steamdb/
 /*.csv
-/*_rendered.html
+/*.htm
+/*.html
+/*_files/

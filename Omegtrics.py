@@ -101,6 +101,9 @@ def build_steamdb_chart_url(appid: str, window: str) -> str:
 def is_steamdb_access_challenge_html(html: str) -> bool:
     """Detect Cloudflare/browser-check pages that are not SteamDB chart content."""
     soup = BeautifulSoup(html, "html.parser")
+    if soup.select_one("#js-chart-players svg .highcharts-tracker-line, #js-chart-players svg .highcharts-graph"):
+        return False
+
     title = soup.title.get_text(" ", strip=True).lower() if soup.title else ""
     body_text = soup.get_text(" ", strip=True).lower()
     return (
