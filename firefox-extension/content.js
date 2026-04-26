@@ -346,6 +346,10 @@
     return Math.round(value).toLocaleString();
   }
 
+  function tooltip(label, help) {
+    return `<span class="omegtrics-help" title="${help}" tabindex="0">${label}</span>`;
+  }
+
   function makeTrendSvg(estimates) {
     const values = estimates.map((item) => item.dauMid);
     const width = 760;
@@ -433,16 +437,16 @@
       .join("");
     return `
       <div class="omegtrics-summary">
-        <div class="omegtrics-metric"><span class="omegtrics-label">Strongest regional signal</span><span class="omegtrics-value">${top.name}</span><span class="omegtrics-label">${top.strength.toLowerCase()} signal</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Prime-time average</span><span class="omegtrics-value">${fmt(top.average)}</span><span class="omegtrics-label">${top.utcWindow}</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Regional lift</span><span class="omegtrics-value">${top.lift.toFixed(2)}x</span><span class="omegtrics-label">vs all-hour average</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Signal share</span><span class="omegtrics-value">${Math.round(top.share * 100)}%</span><span class="omegtrics-label">of regional windows</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Strongest regional signal", "The broad time-zone window with the highest average CCU. This suggests where prime-time activity is strongest, but it is not direct location data.")}</span><span class="omegtrics-value">${top.name}</span><span class="omegtrics-label">${top.strength.toLowerCase()} signal</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Prime-time average", "Average CCU during the selected region's typical evening UTC window.")}</span><span class="omegtrics-value">${fmt(top.average)}</span><span class="omegtrics-label">${top.utcWindow}</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Regional lift", "How much higher this region's prime-time average is compared with the chart's all-hour average. 1.20x means 20% above baseline.")}</span><span class="omegtrics-value">${top.lift.toFixed(2)}x</span><span class="omegtrics-label">vs all-hour average</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Signal share", "This region's share of average activity across the broad regional prime-time windows. Higher share means the chart shape is more concentrated in that time-zone band.")}</span><span class="omegtrics-value">${Math.round(top.share * 100)}%</span><span class="omegtrics-label">of regional windows</span></div>
       </div>
       <div class="omegtrics-region-bars">${bars}</div>
       <p class="omegtrics-note">This is a time-zone popularity signal inferred from when CCU rises. It does not identify player location directly; it compares broad UTC prime-time windows that roughly map to regional evening play.</p>
       <div class="omegtrics-table-wrap">
         <table class="omegtrics-table">
-          <thead><tr><th>Region signal</th><th>UTC window</th><th>Avg CCU</th><th>Peak CCU</th><th>Lift</th><th>Share</th><th>Strength</th></tr></thead>
+          <thead><tr><th>${tooltip("Region signal", "Broad region inferred from time-zone prime-time windows.")}</th><th>${tooltip("UTC window", "The UTC hours used as a proxy for that region's evening play period.")}</th><th>${tooltip("Avg CCU", "Average concurrent users during that regional time window.")}</th><th>${tooltip("Peak CCU", "Highest concurrent users observed during that regional time window.")}</th><th>${tooltip("Lift", "Regional average divided by all-hour average.")}</th><th>${tooltip("Share", "Share of activity across the compared regional windows.")}</th><th>${tooltip("Strength", "A simple label based on lift: strong, moderate, or light.")}</th></tr></thead>
           <tbody>${regionRows}</tbody>
         </table>
       </div>`;
@@ -529,20 +533,20 @@
 
     return `
       <div class="omegtrics-summary">
-        <div class="omegtrics-metric"><span class="omegtrics-label">Retention signal</span><span class="omegtrics-value">${status}</span><span class="omegtrics-label">${confidence}</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Recent avg CCU</span><span class="omegtrics-value">${fmt(latestAvg)}</span><span class="omegtrics-label">latest ${latest.length} day(s)</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Vs previous period</span><span class="omegtrics-value">${previousAvg ? `${Math.round(momentum * 100)}%` : "n/a"}</span><span class="omegtrics-label">${previousAvg ? `${fmt(previousAvg)} prior avg` : "needs more days"}</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Vs peak day</span><span class="omegtrics-value">${peakRetention ? `${Math.round(peakRetention * 100)}%` : "n/a"}</span><span class="omegtrics-label">${peakDay ? peakDay.day : "needs history"}</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Retention signal", "A simple reading of whether recent average CCU is growing, stable, softening, or declining compared with the previous period.")}</span><span class="omegtrics-value">${status}</span><span class="omegtrics-label">${confidence}</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Recent avg CCU", "Average concurrent users across the latest available complete days.")}</span><span class="omegtrics-value">${fmt(latestAvg)}</span><span class="omegtrics-label">latest ${latest.length} day(s)</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Vs previous period", "Recent average CCU divided by the previous comparable period. 100% means flat, above 100% means growth, below 100% means decline.")}</span><span class="omegtrics-value">${previousAvg ? `${Math.round(momentum * 100)}%` : "n/a"}</span><span class="omegtrics-label">${previousAvg ? `${fmt(previousAvg)} prior avg` : "needs more days"}</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Vs peak day", "Recent average CCU divided by the best daily average in the available history. This shows how much activity remains compared with the strongest day.")}</span><span class="omegtrics-value">${peakRetention ? `${Math.round(peakRetention * 100)}%` : "n/a"}</span><span class="omegtrics-label">${peakDay ? peakDay.day : "needs history"}</span></div>
       </div>
       <div class="omegtrics-retention-chart">${makeRetentionBars(analysisDays)}</div>
       <p class="omegtrics-note">This is not cohort retention. It is a CCU retention proxy: recent average activity compared with the previous period and the best day in the available history. Data source: ${historyLabel}.</p>
       <div class="omegtrics-summary omegtrics-summary-compact">
-        <div class="omegtrics-metric"><span class="omegtrics-label">Daily floor consistency</span><span class="omegtrics-value">${Math.round(consistency * 100)}%</span><span class="omegtrics-label">avg trough / peak</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Days analysed</span><span class="omegtrics-value">${analysisDays.length}</span><span class="omegtrics-label">${completeDays.length} complete</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Daily floor consistency", "Average daily low CCU divided by daily peak CCU. Higher values mean the game keeps a steadier audience through off-peak hours; lower values mean activity is more concentrated around peaks.")}</span><span class="omegtrics-value">${Math.round(consistency * 100)}%</span><span class="omegtrics-label">avg trough / peak</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Days analysed", "Number of days available for this retention proxy. Complete days have at least 20 hours of chart coverage.")}</span><span class="omegtrics-value">${analysisDays.length}</span><span class="omegtrics-label">${completeDays.length} complete</span></div>
       </div>
       <div class="omegtrics-table-wrap">
         <table class="omegtrics-table">
-          <thead><tr><th>Date UTC</th><th>Coverage h</th><th>Avg CCU</th><th>Peak CCU</th><th>Low CCU</th><th>Floor</th></tr></thead>
+          <thead><tr><th>${tooltip("Date UTC", "The UTC calendar day represented by this row.")}</th><th>${tooltip("Coverage h", "How many hours of chart data are available for the day.")}</th><th>${tooltip("Avg CCU", "Average concurrent users for the day.")}</th><th>${tooltip("Peak CCU", "Highest observed concurrent users for the day.")}</th><th>${tooltip("Low CCU", "Lowest observed concurrent users for the day.")}</th><th>${tooltip("Floor", "Low CCU divided by peak CCU for that day. Higher is steadier.")}</th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>`;
@@ -603,16 +607,16 @@
 
     panel.querySelector("[data-dau-results]").innerHTML = `
       <div class="omegtrics-summary">
-        <div class="omegtrics-metric"><span class="omegtrics-label">Latest DAU estimate</span><span class="omegtrics-value">${fmt(latest.dauMid)}</span><span class="omegtrics-label">${fmt(latest.dauLow)}-${fmt(latest.dauHigh)} range</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Average DAU estimate</span><span class="omegtrics-value">${fmt(avgMid)}</span><span class="omegtrics-label">${fmt(avgLow)}-${fmt(avgHigh)} range</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Peak CCU in sample</span><span class="omegtrics-value">${fmt(peak)}</span><span class="omegtrics-label">highest chart point</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">Player-hours analysed</span><span class="omegtrics-value">${fmt(playerHours)}</span><span class="omegtrics-label">${basis.length} day(s)</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Latest DAU estimate", "Estimated daily active users for the latest complete day in the selected chart range.")}</span><span class="omegtrics-value">${fmt(latest.dauMid)}</span><span class="omegtrics-label">${fmt(latest.dauLow)}-${fmt(latest.dauHigh)} range</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Average DAU estimate", "Average of daily DAU midpoint estimates across complete days in the selected chart range.")}</span><span class="omegtrics-value">${fmt(avgMid)}</span><span class="omegtrics-label">${fmt(avgLow)}-${fmt(avgHigh)} range</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Peak CCU in sample", "Highest concurrent user count observed in the selected chart range.")}</span><span class="omegtrics-value">${fmt(peak)}</span><span class="omegtrics-label">highest chart point</span></div>
+        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Player-hours analysed", "Sum of hourly CCU over the analysed days. For example, 10,000 CCU for 2 hours equals 20,000 player-hours.")}</span><span class="omegtrics-value">${fmt(playerHours)}</span><span class="omegtrics-label">${basis.length} day(s)</span></div>
       </div>
       <div class="omegtrics-chart">${makeTrendSvg(estimates)}</div>
       <p class="omegtrics-note">Omegtrics sums each day's CCU into player-hours, then divides by assumed average session length. Shorter sessions produce higher DAU estimates.</p>
       <div class="omegtrics-table-wrap">
         <table class="omegtrics-table">
-          <thead><tr><th>Date UTC</th><th>Coverage h</th><th>Avg CCU</th><th>Peak CCU</th><th>Player-hours</th><th>DAU range</th><th>DAU midpoint</th><th>Confidence</th></tr></thead>
+          <thead><tr><th>${tooltip("Date UTC", "The UTC calendar day represented by this row.")}</th><th>${tooltip("Coverage h", "How many hours of chart data are available for the day.")}</th><th>${tooltip("Avg CCU", "Average concurrent users for the day.")}</th><th>${tooltip("Peak CCU", "Highest observed concurrent users for the day.")}</th><th>${tooltip("Player-hours", "Total activity volume for the day: CCU multiplied by hours.")}</th><th>${tooltip("DAU range", "Low-to-high DAU estimate based on the session-length range. Shorter assumed sessions produce higher DAU.")}</th><th>${tooltip("DAU midpoint", "Primary DAU estimate using the midpoint session-length assumption.")}</th><th>${tooltip("Confidence", "Higher means most of the day is covered. Partial day means the day has limited chart coverage.")}</th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>`;

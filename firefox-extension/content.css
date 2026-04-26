@@ -103,6 +103,17 @@
   line-height: 1.25;
 }
 
+.omegtrics-help {
+  cursor: help;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+
+.omegtrics-help:focus {
+  outline: 1px solid var(--link-color, #00aff4);
+  outline-offset: 2px;
+}
+
 .omegtrics-value {
   display: block;
   margin-top: 6px;
