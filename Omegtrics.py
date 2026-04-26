@@ -8,13 +8,13 @@ The script can either:
 
 Examples:
     # Live SteamDB fetch, defaults to --window 1w and 60-minute output rows.
-    python highcharts_svg_to_csv.py players.csv --appid 3932890
+    python omegtrics.py players.csv --appid 3932890
 
     # Live SteamDB fetch for the 48 hour chart.
-    python highcharts_svg_to_csv.py players_48h.csv --appid 3932890 --window 48h
+    python omegtrics.py players_48h.csv --appid 3932890 --window 48h
 
     # Saved rendered HTML/debug input.
-    python highcharts_svg_to_csv.py players.csv --input-html chart.html --interval-minutes 30
+    python omegtrics.py players.csv --input-html chart.html --interval-minutes 30
 
 Install:
     pip install beautifulsoup4 playwright
@@ -50,6 +50,26 @@ MONTHS = {
 }
 
 
+class OmegtricsError(RuntimeError):
+    """Base class for user-facing Omegtrics errors."""
+
+
+class SteamDBAccessError(OmegtricsError):
+    """SteamDB blocked or rejected the page request before the chart could be read."""
+
+
+class SteamDBInvalidAppError(OmegtricsError):
+    """The requested Steam app id does not appear to resolve to a valid SteamDB app page."""
+
+
+class ChartRenderError(OmegtricsError):
+    """The page loaded, but the expected rendered chart could not be found."""
+
+
+class OmegtricsEnvironmentError(OmegtricsError):
+    """The local browser/runtime environment could not run the extraction."""
+
+
 @dataclass(frozen=True)
 class Point:
     x: float
@@ -76,45 +96,124 @@ def build_steamdb_chart_url(appid: str, window: str) -> str:
     return f"{STEAMDB_APP_BASE_URL}{appid}/charts/#{window}"
 
 
-def render_steamdb_chart_html(appid: str, window: str, timeout_ms: int = 45_000, save_rendered_html: Optional[Path] = None) -> str:
+def is_steamdb_access_challenge_html(html: str) -> bool:
+    """Detect Cloudflare/browser-check pages that are not SteamDB chart content."""
+    soup = BeautifulSoup(html, "html.parser")
+    title = soup.title.get_text(" ", strip=True).lower() if soup.title else ""
+    body_text = soup.get_text(" ", strip=True).lower()
+    return (
+        "just a moment" in title
+        or "checking your browser" in body_text
+        or "enable javascript and cookies to continue" in body_text
+        or "/cdn-cgi/challenge-platform/" in html
+    )
+
+
+def steamdb_access_error_message(status: Optional[int], url: str) -> str:
+    status_text = f"HTTP {status}" if status is not None else "a browser verification page"
+    return (
+        f"SteamDB rejected the request with {status_text}: {url}\n\n"
+        "Meaning: the app id may be valid, but SteamDB refused access before the chart could be rendered. "
+        "This is commonly caused by anti-bot/rate-limit protection, VPN/datacenter IP reputation, or a request pattern that SteamDB does not accept.\n\n"
+        "Try:\n"
+        "  1) Open the same URL manually in your normal browser and confirm it loads.\n"
+        "  2) Wait a few minutes if you made repeated requests.\n"
+        "  3) Re-run with --headed so you can see what SteamDB is showing.\n"
+        "  4) Re-run with --debug-dir debug_steamdb to save the returned HTML/screenshot.\n"
+        "  5) Use --input-html with a manually saved rendered page if live access is blocked.\n\n"
+        "This is not the same as an invalid app id; invalid app ids are checked after a page successfully loads."
+    )
+
+
+def save_debug_page(page, debug_dir: Optional[Path], stem: str) -> None:
+    if not debug_dir:
+        return
+    try:
+        page.screenshot(path=str(debug_dir / f"{stem}.png"), full_page=True)
+        (debug_dir / f"{stem}.html").write_text(page.content(), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def render_steamdb_chart_html(
+    appid: str,
+    window: str,
+    timeout_ms: int = 45_000,
+    save_rendered_html: Optional[Path] = None,
+    debug_dir: Optional[Path] = None,
+    headed: bool = False,
+) -> str:
     """Render SteamDB with Playwright so JavaScript-created Highcharts SVG exists in the DOM."""
     try:
+        from playwright.sync_api import Error as PlaywrightError
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
-        raise RuntimeError(
+        raise OmegtricsEnvironmentError(
             "Live SteamDB extraction requires Playwright. Install with:\n"
             "  pip install playwright\n"
             "  python -m playwright install chromium"
         ) from exc
 
     url = build_steamdb_chart_url(appid, window)
+    if debug_dir:
+        debug_dir.mkdir(parents=True, exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0 Safari/537.36"
-            ),
-        )
+        try:
+            browser = p.chromium.launch(headless=not headed)
+            page = browser.new_page(
+                viewport={"width": 1280, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0 Safari/537.36"
+                ),
+            )
+        except PlaywrightError as exc:
+            raise OmegtricsEnvironmentError(
+                "Playwright could not launch Chromium.\n\n"
+                "If you are running inside WSL or a restricted shell, try:\n"
+                "  1) Run without --headed unless you need to see the browser.\n"
+                "  2) Install browser dependencies with: python -m playwright install-deps chromium\n"
+                "  3) Run from a normal terminal session with display access when using --headed."
+            ) from exc
+
         try:
             response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
             if response is None:
-                raise RuntimeError(f"No response received when loading {url}")
+                raise SteamDBAccessError(
+                    f"No HTTP response was received for {url}.\n"
+                    "This usually means the browser navigation was interrupted before SteamDB returned a page."
+                )
+
+            if response.status in {401, 403, 429}:
+                save_debug_page(page, debug_dir, "steamdb_blocked")
+                raise SteamDBAccessError(steamdb_access_error_message(response.status, url))
+
             if response.status >= 400:
-                raise RuntimeError(f"SteamDB returned HTTP {response.status} for {url}")
+                raise SteamDBAccessError(
+                    f"SteamDB returned HTTP {response.status} for {url}.\n"
+                    "The page did not load successfully, so no chart data could be extracted."
+                )
+
+            if is_steamdb_access_challenge_html(page.content()):
+                save_debug_page(page, debug_dir, "steamdb_blocked")
+                raise SteamDBAccessError(steamdb_access_error_message(response.status, url))
 
             # Validate that the page is the intended app page, not a generic error or search page.
             app_id_text = f"App ID {appid}"
             try:
                 page.get_by_text(app_id_text, exact=False).wait_for(timeout=8_000)
             except PlaywrightTimeoutError as exc:
-                raise RuntimeError(
-                    f"Loaded page did not validate as Steam app id {appid}. "
-                    "Check that the app id exists and that SteamDB is reachable."
+                save_debug_page(page, debug_dir, "steamdb_invalid_or_unexpected_page")
+                raise SteamDBInvalidAppError(
+                    f"SteamDB loaded, but the page did not validate as App ID {appid}.\n\n"
+                    "This usually means one of these is true:\n"
+                    "  1) The app id does not exist on SteamDB.\n"
+                    "  2) SteamDB served an interstitial/error page instead of the app page.\n"
+                    "  3) The SteamDB markup changed and the app id text is no longer present in the expected form.\n\n"
+                    "Use --debug-dir debug_steamdb to inspect the page that was actually returned."
                 ) from exc
 
             # The hash is not sent to the server, so set it again after load and try to select the visible range.
@@ -126,9 +225,14 @@ def render_steamdb_chart_html(appid: str, window: str, timeout_ms: int = 45_000,
                 page.locator(".chart-container").first.wait_for(timeout=timeout_ms)
                 page.locator(".chart-container svg .highcharts-tracker-line, .chart-container svg .highcharts-graph").first.wait_for(timeout=timeout_ms)
             except PlaywrightTimeoutError as exc:
-                raise RuntimeError(
-                    "The page loaded, but no rendered Highcharts SVG series was found. "
-                    "SteamDB may have changed its markup, blocked automation, or failed to run JavaScript."
+                save_debug_page(page, debug_dir, "steamdb_no_chart")
+                raise ChartRenderError(
+                    "The SteamDB page loaded and the app id validated, but no rendered Highcharts SVG series was found.\n\n"
+                    "Possible causes:\n"
+                    "  1) SteamDB changed the chart markup.\n"
+                    "  2) JavaScript failed before Highcharts rendered.\n"
+                    "  3) The selected window did not activate correctly.\n\n"
+                    "Use --debug-dir debug_steamdb to save the rendered page and screenshot for inspection."
                 ) from exc
 
             html = page.content()
@@ -372,6 +476,13 @@ def extract_rows_from_html(
     end: Optional[str],
     year: Optional[int],
 ) -> tuple[list[tuple[str, int]], TimeRange, AxisRange]:
+    if is_steamdb_access_challenge_html(html):
+        raise SteamDBAccessError(
+            "The input HTML is a SteamDB browser verification page, not a rendered chart.\n\n"
+            "Open the SteamDB chart manually in a normal browser, wait until the chart is visible, "
+            "then save the rendered page and pass that file with --input-html."
+        )
+
     full_soup = BeautifulSoup(html, "html.parser")
     soup = narrow_to_player_chart(full_soup)
     _plot_x, _plot_y, plot_width, plot_height = get_plot_box(soup)
@@ -424,6 +535,8 @@ def main() -> None:
     parser.add_argument("--end", help="Optional ISO datetime override, e.g. 2026-04-26T17:30:00+00:00")
     parser.add_argument("--year", type=int, help="Year to use when x-axis labels omit it")
     parser.add_argument("--save-rendered-html", type=Path, help="Debug: save browser-rendered HTML before extracting")
+    parser.add_argument("--debug-dir", type=Path, help="Debug: save HTML/screenshot when SteamDB blocks access or the chart cannot be found")
+    parser.add_argument("--headed", action="store_true", help="Show the Chromium browser window while loading SteamDB")
     parser.add_argument("--timeout-ms", type=int, default=45_000, help="Browser/page timeout in milliseconds")
     args = parser.parse_args()
 
@@ -439,6 +552,8 @@ def main() -> None:
                 window=args.window,
                 timeout_ms=args.timeout_ms,
                 save_rendered_html=args.save_rendered_html,
+                debug_dir=args.debug_dir,
+                headed=args.headed,
             )
 
         rows, tr, y_range = extract_rows_from_html(
@@ -456,8 +571,12 @@ def main() -> None:
         print(f"Detected time range: {tr.start.isoformat()} to {tr.end.isoformat()}")
         print(f"Detected y range: {y_range.min_value:g} to {y_range.max_value:g}")
         print(f"First row: {rows[0][0]}, {rows[0][1]}")
-    except Exception as exc:
+    except OmegtricsError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"ERROR: Unexpected failure: {exc}", file=sys.stderr)
+        print("Run again with --debug-dir debug_steamdb if the failure happens while loading SteamDB.", file=sys.stderr)
         sys.exit(1)
 
 

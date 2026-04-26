@@ -1,0 +1,14 @@
+/AGENTS.md
+
+# Python/runtime artifacts
+__pycache__/
+*.py[cod]
+.venv/
+
+# Codex/local workspace state
+.codex
+
+# Omegtrics generated output
+/debug_steamdb/
+/*.csv
+/*_rendered.html
