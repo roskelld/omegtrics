@@ -346,8 +346,75 @@
     return Math.round(value).toLocaleString();
   }
 
-  function tooltip(label, help) {
-    return `<span class="omegtrics-help" title="${help}" tabindex="0">${label}</span>`;
+  function rowsSignature(rows) {
+    return rows.map((row) => `${row.timestamp.toISOString()}:${row.players}`).join("|");
+  }
+
+  function panelSignature(metadata, ccuRows, retentionRows, retentionSource) {
+    return JSON.stringify({
+      name: metadata.name || "",
+      genre: metadata.primaryGenre || "",
+      tags: metadata.tags || [],
+      ccu: rowsSignature(ccuRows),
+      retention: rowsSignature(retentionRows),
+      retentionSource
+    });
+  }
+
+  function appendChildren(node, children) {
+    for (const child of children.flat()) {
+      if (child === null || child === undefined) continue;
+      node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    }
+    return node;
+  }
+
+  function el(tag, attrs = {}, children = []) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attrs)) {
+      if (value === null || value === undefined || value === false) continue;
+      if (key === "className") node.className = value;
+      else if (key === "text") node.textContent = value;
+      else if (key === "hidden") node.hidden = Boolean(value);
+      else if (key === "style") {
+        for (const [prop, styleValue] of Object.entries(value)) {
+          node.style[prop] = styleValue;
+        }
+      } else node.setAttribute(key, String(value));
+    }
+    return appendChildren(node, children);
+  }
+
+  function svgEl(tag, attrs = {}, children = []) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [key, value] of Object.entries(attrs)) {
+      if (value === null || value === undefined || value === false) continue;
+      node.setAttribute(key, String(value));
+    }
+    return appendChildren(node, children);
+  }
+
+  function help(label, title) {
+    return el("span", { className: "omegtrics-help", title, tabindex: "0" }, [label]);
+  }
+
+  function metric(label, title, value, sublabel) {
+    return el("div", { className: "omegtrics-metric" }, [
+      el("span", { className: "omegtrics-label" }, [help(label, title)]),
+      el("span", { className: "omegtrics-value" }, [value]),
+      el("span", { className: "omegtrics-label" }, [sublabel])
+    ]);
+  }
+
+  function table(headers, rows) {
+    return el("div", { className: "omegtrics-table-wrap" }, [
+      el("table", { className: "omegtrics-table" }, [
+        el("thead", {}, [
+          el("tr", {}, headers.map((header) => el("th", {}, [help(header.label, header.help)])))
+        ]),
+        el("tbody", {}, rows.map((row) => el("tr", {}, row.map((cell) => el("td", {}, [cell])))))
+      ])
+    ]);
   }
 
   function makeTrendSvg(estimates) {
@@ -362,10 +429,24 @@
         return `${x.toFixed(1)},${y.toFixed(1)}`;
       })
       .join(" ");
-    return `<svg viewBox="0 0 ${width} ${height}" aria-label="DAU midpoint trend" role="img">
-      <polyline points="${points}" fill="none" stroke="var(--link-color, #00aff4)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
-      <line x1="0" y1="${height - 1}" x2="${width}" y2="${height - 1}" stroke="var(--border-color, #3d4654)" stroke-width="1"></line>
-    </svg>`;
+    return svgEl("svg", { viewBox: `0 0 ${width} ${height}`, "aria-label": "DAU midpoint trend", role: "img" }, [
+      svgEl("polyline", {
+        points,
+        fill: "none",
+        stroke: "var(--link-color, #00aff4)",
+        "stroke-width": "3",
+        "stroke-linecap": "round",
+        "stroke-linejoin": "round"
+      }),
+      svgEl("line", {
+        x1: "0",
+        y1: String(height - 1),
+        x2: String(width),
+        y2: String(height - 1),
+        stroke: "var(--border-color, #3d4654)",
+        "stroke-width": "1"
+      })
+    ]);
   }
 
   function hourInWindow(hour, start, end) {
@@ -414,42 +495,47 @@
       .sort((a, b) => b.average - a.average);
   }
 
-  function makeRegionsHtml(rows) {
+  function makeRegionsNode(rows) {
     const regions = analyseRegions(rows);
     const top = regions[0];
-    const regionRows = regions
-      .map((region) => `<tr>
-        <td>${region.name}</td>
-        <td>${region.utcWindow}</td>
-        <td>${fmt(region.average)}</td>
-        <td>${fmt(region.peak)}</td>
-        <td>${region.lift.toFixed(2)}x</td>
-        <td>${Math.round(region.share * 100)}%</td>
-        <td>${region.strength}</td>
-      </tr>`)
-      .join("");
-    const bars = regions
-      .map((region) => `<div class="omegtrics-region-bar">
-        <div class="omegtrics-region-bar-header"><span>${region.name}</span><strong>${Math.round(region.share * 100)}%</strong></div>
-        <div class="omegtrics-region-track"><div class="omegtrics-region-fill" style="width:${Math.max(region.share * 100, 3).toFixed(1)}%"></div></div>
-        <span class="omegtrics-label">${region.detail}</span>
-      </div>`)
-      .join("");
-    return `
-      <div class="omegtrics-summary">
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Strongest regional signal", "The broad time-zone window with the highest average CCU. This suggests where prime-time activity is strongest, but it is not direct location data.")}</span><span class="omegtrics-value">${top.name}</span><span class="omegtrics-label">${top.strength.toLowerCase()} signal</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Prime-time average", "Average CCU during the selected region's typical evening UTC window.")}</span><span class="omegtrics-value">${fmt(top.average)}</span><span class="omegtrics-label">${top.utcWindow}</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Regional lift", "How much higher this region's prime-time average is compared with the chart's all-hour average. 1.20x means 20% above baseline.")}</span><span class="omegtrics-value">${top.lift.toFixed(2)}x</span><span class="omegtrics-label">vs all-hour average</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Signal share", "This region's share of average activity across the broad regional prime-time windows. Higher share means the chart shape is more concentrated in that time-zone band.")}</span><span class="omegtrics-value">${Math.round(top.share * 100)}%</span><span class="omegtrics-label">of regional windows</span></div>
-      </div>
-      <div class="omegtrics-region-bars">${bars}</div>
-      <p class="omegtrics-note">This is a time-zone popularity signal inferred from when CCU rises. It does not identify player location directly; it compares broad UTC prime-time windows that roughly map to regional evening play.</p>
-      <div class="omegtrics-table-wrap">
-        <table class="omegtrics-table">
-          <thead><tr><th>${tooltip("Region signal", "Broad region inferred from time-zone prime-time windows.")}</th><th>${tooltip("UTC window", "The UTC hours used as a proxy for that region's evening play period.")}</th><th>${tooltip("Avg CCU", "Average concurrent users during that regional time window.")}</th><th>${tooltip("Peak CCU", "Highest concurrent users observed during that regional time window.")}</th><th>${tooltip("Lift", "Regional average divided by all-hour average.")}</th><th>${tooltip("Share", "Share of activity across the compared regional windows.")}</th><th>${tooltip("Strength", "A simple label based on lift: strong, moderate, or light.")}</th></tr></thead>
-          <tbody>${regionRows}</tbody>
-        </table>
-      </div>`;
+    return el("div", {}, [
+      el("div", { className: "omegtrics-summary" }, [
+        metric("Strongest regional signal", "The broad time-zone window with the highest average CCU. This suggests where prime-time activity is strongest, but it is not direct location data.", top.name, `${top.strength.toLowerCase()} signal`),
+        metric("Prime-time average", "Average CCU during the selected region's typical evening UTC window.", fmt(top.average), top.utcWindow),
+        metric("Regional lift", "How much higher this region's prime-time average is compared with the chart's all-hour average. 1.20x means 20% above baseline.", `${top.lift.toFixed(2)}x`, "vs all-hour average"),
+        metric("Signal share", "This region's share of average activity across the broad regional prime-time windows. Higher share means the chart shape is more concentrated in that time-zone band.", `${Math.round(top.share * 100)}%`, "of regional windows")
+      ]),
+      el("div", { className: "omegtrics-region-bars" }, regions.map((region) =>
+        el("div", { className: "omegtrics-region-bar" }, [
+          el("div", { className: "omegtrics-region-bar-header" }, [
+            el("span", {}, [region.name]),
+            el("strong", {}, [`${Math.round(region.share * 100)}%`])
+          ]),
+          el("div", { className: "omegtrics-region-track" }, [
+            el("div", { className: "omegtrics-region-fill", style: { width: `${Math.max(region.share * 100, 3).toFixed(1)}%` } })
+          ]),
+          el("span", { className: "omegtrics-label" }, [region.detail])
+        ])
+      )),
+      el("p", { className: "omegtrics-note" }, ["This is a time-zone popularity signal inferred from when CCU rises. It does not identify player location directly; it compares broad UTC prime-time windows that roughly map to regional evening play."]),
+      table([
+        { label: "Region signal", help: "Broad region inferred from time-zone prime-time windows." },
+        { label: "UTC window", help: "The UTC hours used as a proxy for that region's evening play period." },
+        { label: "Avg CCU", help: "Average concurrent users during that regional time window." },
+        { label: "Peak CCU", help: "Highest concurrent users observed during that regional time window." },
+        { label: "Lift", help: "Regional average divided by all-hour average." },
+        { label: "Share", help: "Share of activity across the compared regional windows." },
+        { label: "Strength", help: "A simple label based on lift: strong, moderate, or light." }
+      ], regions.map((region) => [
+        region.name,
+        region.utcWindow,
+        fmt(region.average),
+        fmt(region.peak),
+        `${region.lift.toFixed(2)}x`,
+        `${Math.round(region.share * 100)}%`,
+        region.strength
+      ]))
+    ]);
   }
 
   function dailyActivity(rows) {
@@ -493,18 +579,16 @@
   function makeRetentionBars(days) {
     const recent = days.slice(-14);
     const max = Math.max(...recent.map((day) => day.avgCcu), 1);
-    return recent
-      .map((day) => {
+    return recent.map((day) => {
         const height = Math.max((day.avgCcu / max) * 100, 3);
-        return `<div class="omegtrics-retention-day" title="${day.day}: ${fmt(day.avgCcu)} avg CCU">
-          <div class="omegtrics-retention-bar" style="height:${height.toFixed(1)}%"></div>
-          <span>${day.day.slice(5)}</span>
-        </div>`;
-      })
-      .join("");
+        return el("div", { className: "omegtrics-retention-day", title: `${day.day}: ${fmt(day.avgCcu)} avg CCU` }, [
+          el("div", { className: "omegtrics-retention-bar", style: { height: `${height.toFixed(1)}%` } }),
+          el("span", {}, [day.day.slice(5)])
+        ]);
+      });
   }
 
-  function makeRetentionHtml(rows, sourceLabel) {
+  function makeRetentionNode(rows, sourceLabel) {
     const days = dailyActivity(rows);
     const completeDays = days.filter((day) => day.complete);
     const analysisDays = completeDays.length >= 3 ? completeDays : days;
@@ -519,37 +603,36 @@
     const status = retentionStatus(momentum);
     const historyLabel = sourceLabel === "highcharts-full" ? "Highcharts page data" : "Visible chart range";
     const confidence = sourceLabel === "highcharts-full" && analysisDays.length >= 14 ? "broader history" : "limited range";
-    const rowsHtml = analysisDays
-      .slice(-14)
-      .map((day) => `<tr>
-        <td>${day.day}</td>
-        <td>${day.coverage.toFixed(1)}</td>
-        <td>${fmt(day.avgCcu)}</td>
-        <td>${fmt(day.peak)}</td>
-        <td>${fmt(day.low)}</td>
-        <td>${day.peak ? Math.round((day.low / day.peak) * 100) : 0}%</td>
-      </tr>`)
-      .join("");
 
-    return `
-      <div class="omegtrics-summary">
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Retention signal", "A simple reading of whether recent average CCU is growing, stable, softening, or declining compared with the previous period.")}</span><span class="omegtrics-value">${status}</span><span class="omegtrics-label">${confidence}</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Recent avg CCU", "Average concurrent users across the latest available complete days.")}</span><span class="omegtrics-value">${fmt(latestAvg)}</span><span class="omegtrics-label">latest ${latest.length} day(s)</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Vs previous period", "Recent average CCU divided by the previous comparable period. 100% means flat, above 100% means growth, below 100% means decline.")}</span><span class="omegtrics-value">${previousAvg ? `${Math.round(momentum * 100)}%` : "n/a"}</span><span class="omegtrics-label">${previousAvg ? `${fmt(previousAvg)} prior avg` : "needs more days"}</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Vs peak day", "Recent average CCU divided by the best daily average in the available history. This shows how much activity remains compared with the strongest day.")}</span><span class="omegtrics-value">${peakRetention ? `${Math.round(peakRetention * 100)}%` : "n/a"}</span><span class="omegtrics-label">${peakDay ? peakDay.day : "needs history"}</span></div>
-      </div>
-      <div class="omegtrics-retention-chart">${makeRetentionBars(analysisDays)}</div>
-      <p class="omegtrics-note">This is not cohort retention. It is a CCU retention proxy: recent average activity compared with the previous period and the best day in the available history. Data source: ${historyLabel}.</p>
-      <div class="omegtrics-summary omegtrics-summary-compact">
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Daily floor consistency", "Average daily low CCU divided by daily peak CCU. Higher values mean the game keeps a steadier audience through off-peak hours; lower values mean activity is more concentrated around peaks.")}</span><span class="omegtrics-value">${Math.round(consistency * 100)}%</span><span class="omegtrics-label">avg trough / peak</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Days analysed", "Number of days available for this retention proxy. Complete days have at least 20 hours of chart coverage.")}</span><span class="omegtrics-value">${analysisDays.length}</span><span class="omegtrics-label">${completeDays.length} complete</span></div>
-      </div>
-      <div class="omegtrics-table-wrap">
-        <table class="omegtrics-table">
-          <thead><tr><th>${tooltip("Date UTC", "The UTC calendar day represented by this row.")}</th><th>${tooltip("Coverage h", "How many hours of chart data are available for the day.")}</th><th>${tooltip("Avg CCU", "Average concurrent users for the day.")}</th><th>${tooltip("Peak CCU", "Highest observed concurrent users for the day.")}</th><th>${tooltip("Low CCU", "Lowest observed concurrent users for the day.")}</th><th>${tooltip("Floor", "Low CCU divided by peak CCU for that day. Higher is steadier.")}</th></tr></thead>
-          <tbody>${rowsHtml}</tbody>
-        </table>
-      </div>`;
+    return el("div", {}, [
+      el("div", { className: "omegtrics-summary" }, [
+        metric("Retention signal", "A simple reading of whether recent average CCU is growing, stable, softening, or declining compared with the previous period.", status, confidence),
+        metric("Recent avg CCU", "Average concurrent users across the latest available complete days.", fmt(latestAvg), `latest ${latest.length} day(s)`),
+        metric("Vs previous period", "Recent average CCU divided by the previous comparable period. 100% means flat, above 100% means growth, below 100% means decline.", previousAvg ? `${Math.round(momentum * 100)}%` : "n/a", previousAvg ? `${fmt(previousAvg)} prior avg` : "needs more days"),
+        metric("Vs peak day", "Recent average CCU divided by the best daily average in the available history. This shows how much activity remains compared with the strongest day.", peakRetention ? `${Math.round(peakRetention * 100)}%` : "n/a", peakDay ? peakDay.day : "needs history")
+      ]),
+      el("div", { className: "omegtrics-retention-chart" }, makeRetentionBars(analysisDays)),
+      el("p", { className: "omegtrics-note" }, [`This is not cohort retention. It is a CCU retention proxy: recent average activity compared with the previous period and the best day in the available history. Data source: ${historyLabel}.`]),
+      el("div", { className: "omegtrics-summary omegtrics-summary-compact" }, [
+        metric("Daily floor consistency", "Average daily low CCU divided by daily peak CCU. Higher values mean the game keeps a steadier audience through off-peak hours; lower values mean activity is more concentrated around peaks.", `${Math.round(consistency * 100)}%`, "avg trough / peak"),
+        metric("Days analysed", "Number of days available for this retention proxy. Complete days have at least 20 hours of chart coverage.", analysisDays.length, `${completeDays.length} complete`)
+      ]),
+      table([
+        { label: "Date UTC", help: "The UTC calendar day represented by this row." },
+        { label: "Coverage h", help: "How many hours of chart data are available for the day." },
+        { label: "Avg CCU", help: "Average concurrent users for the day." },
+        { label: "Peak CCU", help: "Highest observed concurrent users for the day." },
+        { label: "Low CCU", help: "Lowest observed concurrent users for the day." },
+        { label: "Floor", help: "Low CCU divided by peak CCU for that day. Higher is steadier." }
+      ], analysisDays.slice(-14).map((day) => [
+        day.day,
+        day.coverage.toFixed(1),
+        fmt(day.avgCcu),
+        fmt(day.peak),
+        fmt(day.low),
+        `${day.peak ? Math.round((day.low / day.peak) * 100) : 0}%`
+      ]))
+    ]);
   }
 
   function activeTab(panel) {
@@ -580,7 +663,9 @@
   function updatePanelData(panel, metadata, ccuRows, retentionRows, retentionSource, initialSession) {
     const session = currentSession(panel, initialSession);
     if (!(session.low > 0 && session.mid > 0 && session.high > 0 && session.low <= session.mid && session.mid <= session.high)) {
-      panel.querySelector("[data-dau-results]").innerHTML = '<div class="omegtrics-error">Session inputs must satisfy low <= midpoint <= high.</div>';
+      panel.querySelector("[data-dau-results]").replaceChildren(
+        el("div", { className: "omegtrics-error" }, ["Session inputs must satisfy low <= midpoint <= high."])
+      );
       return;
     }
     const estimates = estimateDaily(ccuRows, session);
@@ -592,82 +677,111 @@
     const avgHigh = basis.reduce((sum, item) => sum + item.dauHigh, 0) / basis.length;
     const peak = Math.max(...estimates.map((item) => item.peak));
     const playerHours = basis.reduce((sum, item) => sum + item.playerHours, 0);
-    const rowsHtml = estimates
-      .map((item) => `<tr>
-        <td>${item.day}</td>
-        <td>${item.coverage.toFixed(1)}</td>
-        <td>${fmt(item.avgCcu)}</td>
-        <td>${fmt(item.peak)}</td>
-        <td>${fmt(item.playerHours)}</td>
-        <td>${fmt(item.dauLow)}-${fmt(item.dauHigh)}</td>
-        <td>${fmt(item.dauMid)}</td>
-        <td>${item.confidence}</td>
-      </tr>`)
-      .join("");
 
-    panel.querySelector("[data-dau-results]").innerHTML = `
-      <div class="omegtrics-summary">
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Latest DAU estimate", "Estimated daily active users for the latest complete day in the selected chart range.")}</span><span class="omegtrics-value">${fmt(latest.dauMid)}</span><span class="omegtrics-label">${fmt(latest.dauLow)}-${fmt(latest.dauHigh)} range</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Average DAU estimate", "Average of daily DAU midpoint estimates across complete days in the selected chart range.")}</span><span class="omegtrics-value">${fmt(avgMid)}</span><span class="omegtrics-label">${fmt(avgLow)}-${fmt(avgHigh)} range</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Peak CCU in sample", "Highest concurrent user count observed in the selected chart range.")}</span><span class="omegtrics-value">${fmt(peak)}</span><span class="omegtrics-label">highest chart point</span></div>
-        <div class="omegtrics-metric"><span class="omegtrics-label">${tooltip("Player-hours analysed", "Sum of hourly CCU over the analysed days. For example, 10,000 CCU for 2 hours equals 20,000 player-hours.")}</span><span class="omegtrics-value">${fmt(playerHours)}</span><span class="omegtrics-label">${basis.length} day(s)</span></div>
-      </div>
-      <div class="omegtrics-chart">${makeTrendSvg(estimates)}</div>
-      <p class="omegtrics-note">Omegtrics sums each day's CCU into player-hours, then divides by assumed average session length. Shorter sessions produce higher DAU estimates.</p>
-      <div class="omegtrics-table-wrap">
-        <table class="omegtrics-table">
-          <thead><tr><th>${tooltip("Date UTC", "The UTC calendar day represented by this row.")}</th><th>${tooltip("Coverage h", "How many hours of chart data are available for the day.")}</th><th>${tooltip("Avg CCU", "Average concurrent users for the day.")}</th><th>${tooltip("Peak CCU", "Highest observed concurrent users for the day.")}</th><th>${tooltip("Player-hours", "Total activity volume for the day: CCU multiplied by hours.")}</th><th>${tooltip("DAU range", "Low-to-high DAU estimate based on the session-length range. Shorter assumed sessions produce higher DAU.")}</th><th>${tooltip("DAU midpoint", "Primary DAU estimate using the midpoint session-length assumption.")}</th><th>${tooltip("Confidence", "Higher means most of the day is covered. Partial day means the day has limited chart coverage.")}</th></tr></thead>
-          <tbody>${rowsHtml}</tbody>
-        </table>
-      </div>`;
-    panel.querySelector("[data-regions-results]").innerHTML = makeRegionsHtml(ccuRows);
-    panel.querySelector("[data-retention-results]").innerHTML = makeRetentionHtml(retentionRows, retentionSource);
+    panel.querySelector("[data-dau-results]").replaceChildren(
+      el("div", { className: "omegtrics-summary" }, [
+        metric("Latest DAU estimate", "Estimated daily active users for the latest complete day in the selected chart range.", fmt(latest.dauMid), `${fmt(latest.dauLow)}-${fmt(latest.dauHigh)} range`),
+        metric("Average DAU estimate", "Average of daily DAU midpoint estimates across complete days in the selected chart range.", fmt(avgMid), `${fmt(avgLow)}-${fmt(avgHigh)} range`),
+        metric("Peak CCU in sample", "Highest concurrent user count observed in the selected chart range.", fmt(peak), "highest chart point"),
+        metric("Player-hours analysed", "Sum of hourly CCU over the analysed days. For example, 10,000 CCU for 2 hours equals 20,000 player-hours.", fmt(playerHours), `${basis.length} day(s)`)
+      ]),
+      el("div", { className: "omegtrics-chart" }, [makeTrendSvg(estimates)]),
+      el("p", { className: "omegtrics-note" }, ["Omegtrics sums each day's CCU into player-hours, then divides by assumed average session length. Shorter sessions produce higher DAU estimates."]),
+      table([
+        { label: "Date UTC", help: "The UTC calendar day represented by this row." },
+        { label: "Coverage h", help: "How many hours of chart data are available for the day." },
+        { label: "Avg CCU", help: "Average concurrent users for the day." },
+        { label: "Peak CCU", help: "Highest observed concurrent users for the day." },
+        { label: "Player-hours", help: "Total activity volume for the day: CCU multiplied by hours." },
+        { label: "DAU range", help: "Low-to-high DAU estimate based on the session-length range. Shorter assumed sessions produce higher DAU." },
+        { label: "DAU midpoint", help: "Primary DAU estimate using the midpoint session-length assumption." },
+        { label: "Confidence", help: "Higher means most of the day is covered. Partial day means the day has limited chart coverage." }
+      ], estimates.map((item) => [
+        item.day,
+        item.coverage.toFixed(1),
+        fmt(item.avgCcu),
+        fmt(item.peak),
+        fmt(item.playerHours),
+        `${fmt(item.dauLow)}-${fmt(item.dauHigh)}`,
+        fmt(item.dauMid),
+        item.confidence
+      ]))
+    );
+    panel.querySelector("[data-regions-results]").replaceChildren(makeRegionsNode(ccuRows));
+    panel.querySelector("[data-retention-results]").replaceChildren(makeRetentionNode(retentionRows, retentionSource));
     panel.querySelector("[data-source-range]").textContent = `${ccuRows[0].timestamp.toISOString().slice(0, 10)} to ${ccuRows[ccuRows.length - 1].timestamp.toISOString().slice(0, 10)}`;
     panel.querySelector(".omegtrics-subtitle").textContent = `${metadata.name || "SteamDB app"} · ${metadata.primaryGenre || "Unknown genre"} · ${metadata.tags.slice(0, 4).join(", ")}`;
   }
 
   function renderPanel(container, metadata, ccuRows, retentionRows, retentionSource, initialSession, previousState = {}) {
+    const nextSignature = panelSignature(metadata, ccuRows, retentionRows, retentionSource);
+    const existingPanel = document.getElementById(PANEL_ID);
+    if (existingPanel?.dataset.renderSignature === nextSignature) {
+      return;
+    }
+
     document.getElementById(PANEL_ID)?.remove();
     const panel = document.createElement("section");
     panel.id = PANEL_ID;
     panel.className = "omegtrics-panel";
+    panel.dataset.renderSignature = nextSignature;
     container.insertAdjacentElement("afterend", panel);
 
-    panel.innerHTML = `
-      <div class="omegtrics-header">
-        <div>
-          <h2 class="omegtrics-title">Omegtrics</h2>
-          <p class="omegtrics-subtitle">${metadata.name || "SteamDB app"} · ${metadata.primaryGenre || "Unknown genre"} · ${metadata.tags.slice(0, 4).join(", ")}</p>
-        </div>
-        <span class="omegtrics-range">Chart: <span data-source-range></span></span>
-      </div>
-      <div class="omegtrics-tabs" role="tablist" aria-label="Omegtrics analysis views">
-        <button type="button" class="omegtrics-tab is-active" role="tab" aria-selected="true" aria-controls="omegtrics-tab-dau" data-tab-target="dau">DAU</button>
-        <button type="button" class="omegtrics-tab" role="tab" aria-selected="false" aria-controls="omegtrics-tab-regions" data-tab-target="regions">Regions</button>
-        <button type="button" class="omegtrics-tab" role="tab" aria-selected="false" aria-controls="omegtrics-tab-patterns" data-tab-target="patterns">Patterns</button>
-        <button type="button" class="omegtrics-tab" role="tab" aria-selected="false" aria-controls="omegtrics-tab-retention" data-tab-target="retention">Retention</button>
-      </div>
-      <div class="omegtrics-tab-panel is-active" id="omegtrics-tab-dau" role="tabpanel" data-tab-panel="dau">
-        <div class="omegtrics-controls" aria-label="Session assumptions">
-          <div class="omegtrics-control"><label>Low session hours</label><input type="number" min="0.1" step="0.25" value="${initialSession.low}" data-session-low></div>
-          <div class="omegtrics-control"><label>Midpoint session hours</label><input type="number" min="0.1" step="0.25" value="${initialSession.mid}" data-session-mid></div>
-          <div class="omegtrics-control"><label>High session hours</label><input type="number" min="0.1" step="0.25" value="${initialSession.high}" data-session-high></div>
-        </div>
-        <p class="omegtrics-subtitle">${initialSession.note} Adjust the session assumptions to test the DAU range.</p>
-        <div data-dau-results></div>
-      </div>
-      <div class="omegtrics-tab-panel" id="omegtrics-tab-regions" role="tabpanel" hidden data-tab-panel="regions">
-        <div data-regions-results></div>
-      </div>
-      <div class="omegtrics-tab-panel" id="omegtrics-tab-patterns" role="tabpanel" hidden data-tab-panel="patterns">
-        <div class="omegtrics-empty-state">
-          <h3>Patterns</h3>
-          <p>Upcoming view for peak windows and weekday comparisons.</p>
-        </div>
-      </div>
-      <div class="omegtrics-tab-panel" id="omegtrics-tab-retention" role="tabpanel" hidden data-tab-panel="retention">
-        <div data-retention-results></div>
-      </div>`;
+    const makeTab = (target, label, active = false) =>
+      el("button", {
+        type: "button",
+        className: `omegtrics-tab${active ? " is-active" : ""}`,
+        role: "tab",
+        "aria-selected": String(active),
+        "aria-controls": `omegtrics-tab-${target}`,
+        "data-tab-target": target
+      }, [label]);
+    const sessionControl = (label, value, dataAttr) =>
+      el("div", { className: "omegtrics-control" }, [
+        el("label", {}, [label]),
+        el("input", { type: "number", min: "0.1", step: "0.25", value, [dataAttr]: "" })
+      ]);
+    const tabPanel = (target, active, children) =>
+      el("div", {
+        className: `omegtrics-tab-panel${active ? " is-active" : ""}`,
+        id: `omegtrics-tab-${target}`,
+        role: "tabpanel",
+        hidden: !active,
+        "data-tab-panel": target
+      }, children);
+
+    panel.replaceChildren(
+      el("div", { className: "omegtrics-header" }, [
+        el("div", {}, [
+          el("h2", { className: "omegtrics-title" }, ["Omegtrics"]),
+          el("p", { className: "omegtrics-subtitle" }, [`${metadata.name || "SteamDB app"} · ${metadata.primaryGenre || "Unknown genre"} · ${metadata.tags.slice(0, 4).join(", ")}`])
+        ]),
+        el("span", { className: "omegtrics-range" }, ["Chart: ", el("span", { "data-source-range": "" })])
+      ]),
+      el("div", { className: "omegtrics-tabs", role: "tablist", "aria-label": "Omegtrics analysis views" }, [
+        makeTab("dau", "DAU", true),
+        makeTab("regions", "Regions"),
+        makeTab("patterns", "Patterns"),
+        makeTab("retention", "Retention")
+      ]),
+      tabPanel("dau", true, [
+        el("div", { className: "omegtrics-controls", "aria-label": "Session assumptions" }, [
+          sessionControl("Low session hours", initialSession.low, "data-session-low"),
+          sessionControl("Midpoint session hours", initialSession.mid, "data-session-mid"),
+          sessionControl("High session hours", initialSession.high, "data-session-high")
+        ]),
+        el("p", { className: "omegtrics-subtitle" }, [`${initialSession.note} Adjust the session assumptions to test the DAU range.`]),
+        el("div", { "data-dau-results": "" })
+      ]),
+      tabPanel("regions", false, [el("div", { "data-regions-results": "" })]),
+      tabPanel("patterns", false, [
+        el("div", { className: "omegtrics-empty-state" }, [
+          el("h3", {}, ["Patterns"]),
+          el("p", {}, ["Upcoming view for peak windows and weekday comparisons."])
+        ])
+      ]),
+      tabPanel("retention", false, [el("div", { "data-retention-results": "" })])
+    );
     panel.querySelectorAll("[data-tab-target]").forEach((tab) => {
       tab.addEventListener("click", () => {
         const target = tab.getAttribute("data-tab-target");
